@@ -1,6 +1,22 @@
 version: '3.8'
 
 services:
+  # PostgreSQL for complete state backup
+  postgres:
+    image: postgres:15
+    container_name: wgrest-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wgrest_backup
+      POSTGRES_USER: wgrest
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+
+  # Standard wgrest (file-based)
   wgrest:
     image: suquant/wgrest:latest
     container_name: wgrest
@@ -10,11 +26,15 @@ services:
     volumes:
       - /etc/wireguard:/etc/wireguard
       - ./config/wgrest.yaml:/app/config.yaml
+      - wgrest_data:/app/data
     environment:
       - WGREST_CONFIG=/app/config.yaml
+    ports:
+      - "${WGREST_PORT:-8080}:8080"
     depends_on:
       - wireguard
 
+  # WireGuard container
   wireguard:
     image: linuxserver/wireguard:latest
     container_name: wireguard
@@ -34,3 +54,25 @@ services:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
     restart: unless-stopped
+
+  # Sync service: wgrest → PostgreSQL
+  wgrest-sync:
+    build: ./sync-service
+    container_name: wgrest-sync
+    restart: unless-stopped
+    environment:
+      - WGREST_API_URL=http://localhost:8080
+      - WGREST_API_KEY=${WGREST_API_KEY}
+      - DATABASE_URL=postgresql://wgrest:${DB_PASSWORD}@postgres:5432/wgrest_backup
+      - SYNC_INTERVAL=60  # seconds
+    volumes:
+      - /etc/wireguard:/etc/wireguard:ro
+      - wgrest_data:/app/wgrest_data:ro
+    depends_on:
+      - postgres
+      - wgrest
+    network_mode: host
+
+volumes:
+  postgres_data:
+  wgrest_data:

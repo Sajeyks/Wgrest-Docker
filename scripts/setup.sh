@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Setting up WireGuard Docker (Database-Only Persistence)..."
+echo "🚀 Setting up WireGuard with Database Backup..."
 
 # Load environment
 if [ ! -f .env ]; then
@@ -10,16 +10,6 @@ if [ ! -f .env ]; then
 fi
 
 source .env
-
-# Check if PostgreSQL database exists and is accessible
-echo "📋 Checking PostgreSQL database..."
-if ! psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "SELECT 1;" &>/dev/null; then
-    echo "❌ Cannot connect to PostgreSQL database. Please ensure:"
-    echo "   - PostgreSQL is running on $DB_HOST:$DB_PORT"
-    echo "   - Database '$DB_NAME' exists"
-    echo "   - User '$DB_USER' has access"
-    exit 1
-fi
 
 # Install Docker if needed
 if ! command -v docker &> /dev/null; then
@@ -36,44 +26,31 @@ if ! command -v docker-compose &> /dev/null; then
     sudo chmod +x /usr/local/bin/docker-compose
 fi
 
-# Generate WireGuard keys if they don't exist in database
-echo "🔑 Setting up WireGuard keys..."
+# Generate WireGuard keys
+echo "🔑 Generating WireGuard keys..."
+WG0_PRIVATE=$(wg genkey)
+WG0_PUBLIC=$(echo $WG0_PRIVATE | wg pubkey)
+WG1_PRIVATE=$(wg genkey)
+WG1_PUBLIC=$(echo $WG1_PRIVATE | wg pubkey)
 
-# Check if wgrest has existing interface configs in database
-WG0_EXISTS=$(psql -h $DB_HOST -U $DB_USER -d $DB_NAME -t -c "SELECT EXISTS(SELECT 1 FROM interfaces WHERE name='wg0');" 2>/dev/null | xargs || echo "false")
-WG1_EXISTS=$(psql -h $DB_HOST -U $DB_USER -d $DB_NAME -t -c "SELECT EXISTS(SELECT 1 FROM interfaces WHERE name='wg1');" 2>/dev/null | xargs || echo "false")
-
-if [ "$WG0_EXISTS" = "false" ] || [ "$WG1_EXISTS" = "false" ]; then
-    echo "🔑 Generating new WireGuard keys..."
-    WG0_PRIVATE=$(wg genkey)
-    WG0_PUBLIC=$(echo $WG0_PRIVATE | wg pubkey)
-    WG1_PRIVATE=$(wg genkey)
-    WG1_PUBLIC=$(echo $WG1_PRIVATE | wg pubkey)
-    
-    echo "   wg0 Public Key: $WG0_PUBLIC"
-    echo "   wg1 Public Key: $WG1_PUBLIC"
-else
-    echo "✅ Using existing keys from database"
-fi
-
-# Create initial WireGuard configs (wgrest will manage these)
+# Create initial WireGuard configs
 echo "📝 Creating initial WireGuard configurations..."
 sudo mkdir -p /etc/wireguard
 
-# Basic wg0 config (peers will be added by wgrest)
+# wg0 config (FreeRADIUS)
 sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
 [Interface]
-PrivateKey = ${WG0_PRIVATE:-PLACEHOLDER}
+PrivateKey = $WG0_PRIVATE
 Address = 10.10.0.1/24
 ListenPort = $WG0_PORT
 PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
 EOF
 
-# Basic wg1 config (peers will be added by wgrest)  
+# wg1 config (MikroTik)  
 sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
-PrivateKey = ${WG1_PRIVATE:-PLACEHOLDER}
+PrivateKey = $WG1_PRIVATE
 Address = 10.11.0.1/24
 ListenPort = $WG1_PORT
 PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
@@ -99,7 +76,7 @@ docker-compose up -d
 
 # Wait for services
 echo "⏳ Waiting for services to start..."
-sleep 15
+sleep 30
 
 # Test wgrest API
 echo "🧪 Testing wgrest API..."
@@ -107,9 +84,18 @@ if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_P
     echo "✅ wgrest API is responding"
 else
     echo "❌ wgrest API is not responding"
-    echo "📋 Service status:"
-    docker-compose ps
+    docker-compose logs wgrest
     exit 1
+fi
+
+# Check sync service
+echo "🔄 Checking sync service..."
+sleep 10
+if docker-compose logs wgrest-sync | grep -q "Sync completed"; then
+    echo "✅ Sync service is working"
+else
+    echo "⚠️  Sync service may still be starting..."
+    docker-compose logs wgrest-sync
 fi
 
 echo ""
@@ -118,13 +104,15 @@ echo ""
 echo "📊 Your WireGuard server details:"
 echo "   🌐 wgrest API: http://$SERVER_IP:$WGREST_PORT"
 echo "   🔑 API Key: $WGREST_API_KEY"
-echo "   📋 Database: $DB_HOST:$DB_PORT/$DB_NAME"
+echo "   🔑 wg0 Public Key: $WG0_PUBLIC"
+echo "   🔑 wg1 Public Key: $WG1_PUBLIC"
+echo "   🗄️  Database: localhost:5432/wgrest_backup"
 echo ""
 echo "🔧 Next steps:"
-echo "   1. Test API: curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/api/v1/interfaces"
-echo "   2. Configure your Django app to use this wgrest API"
-echo "   3. Create peers via Django -> wgrest API"
+echo "   1. Configure your Django app to use this wgrest API"
+echo "   2. Create peers via Django -> wgrest API"
+echo "   3. Database automatically syncs every 60 seconds"
 echo ""
 echo "💾 Backup strategy:"
-echo "   - Just backup your PostgreSQL database ($DB_NAME)"
-echo "   - Restoration: restore database + run 'docker-compose up -d'"
+echo "   - Backup PostgreSQL database: pg_dump wgrest_backup"
+echo "   - Restoration: restore database + run './scripts/restore.sh'"

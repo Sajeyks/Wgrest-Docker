@@ -10,11 +10,8 @@ services:
     volumes:
       - /etc/wireguard:/etc/wireguard
       - ./config/wgrest.yaml:/app/config.yaml
-      - ./peers:/app/peers
     environment:
       - WGREST_CONFIG=/app/config.yaml
-    ports:
-      - "8080:8080"
     depends_on:
       - wireguard
 
@@ -29,24 +26,11 @@ services:
       - PGID=1000
       - TZ=Europe/London
     volumes:
-      - ./config:/config
       - /lib/modules:/lib/modules
     ports:
-      - "51820:51820/udp"
-      - "51821:51821/udp"
+      - "${WG0_PORT:-51820}:51820/udp"
+      - "${WG1_PORT:-51821}:51821/udp"
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
-    restart: unless-stopped
-
-  backup:
-    image: rclone/rclone:latest
-    container_name: backup
-    volumes:
-      - ./:/data
-      - ./rclone.conf:/config/rclone/rclone.conf
-    environment:
-      - RCLONE_CONFIG=/config/rclone/rclone.conf
-    entrypoint: /bin/sh
-    command: -c "while true; do sleep 86400; rclone sync /data r2:wireguard-backups/; done"
     restart: unless-stopped

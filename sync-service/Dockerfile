@@ -1,6 +1,4 @@
-FROM python:3.11-slim
-
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-alpine
 
 WORKDIR /app
 

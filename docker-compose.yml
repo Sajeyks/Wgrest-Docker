@@ -1,21 +1,6 @@
 version: '3.8'
 
 services:
-  # PostgreSQL for complete state backup
-  postgres:
-    image: postgres:15
-    container_name: wgrest-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: wgrest_backup
-      POSTGRES_USER: wgrest
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "5432:5432"
-
   # Standard wgrest (file-based)
   wgrest:
     image: suquant/wgrest:latest
@@ -55,7 +40,7 @@ services:
       - net.ipv4.ip_forward=1
     restart: unless-stopped
 
-  # Sync service: wgrest → PostgreSQL
+  # Sync service: wgrest → External PostgreSQL
   wgrest-sync:
     build: ./sync-service
     container_name: wgrest-sync
@@ -63,16 +48,14 @@ services:
     environment:
       - WGREST_API_URL=http://localhost:8080
       - WGREST_API_KEY=${WGREST_API_KEY}
-      - DATABASE_URL=postgresql://wgrest:${DB_PASSWORD}@postgres:5432/wgrest_backup
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
       - SYNC_INTERVAL=60  # seconds
     volumes:
       - /etc/wireguard:/etc/wireguard:ro
       - wgrest_data:/app/wgrest_data:ro
     depends_on:
-      - postgres
       - wgrest
     network_mode: host
 
 volumes:
-  postgres_data:
   wgrest_data:

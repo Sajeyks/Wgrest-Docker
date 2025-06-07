@@ -3,7 +3,7 @@ set -e
 
 echo "🔄 WireGuard Database Restoration"
 echo ""
-echo "⚠️  This will restore WireGuard from PostgreSQL database"
+echo "⚠️  This will restore WireGuard from external PostgreSQL database"
 echo "   Make sure your database is restored first!"
 echo ""
 read -p "Continue? (y/N): " -n 1 -r
@@ -14,29 +14,27 @@ fi
 
 source .env
 
-echo "🔄 Starting restoration from database..."
+echo "🔄 Starting restoration from external database..."
 
 # Stop services
 echo "Stopping services..."
 docker-compose down
 
-# Start only postgres and wait
-echo "Starting PostgreSQL..."
-docker-compose up -d postgres
-sleep 10
-
-# Check database connection
-echo "🔍 Checking database..."
-if ! docker-compose exec postgres psql -U wgrest -d wgrest_backup -c "SELECT COUNT(*) FROM peers;" &>/dev/null; then
-    echo "❌ Cannot connect to database or no data found"
-    echo "   Make sure you've restored your PostgreSQL backup first:"
-    echo "   pg_restore -h localhost -U wgrest -d wgrest_backup your_backup.sql"
+# Check external database connection
+echo "🔍 Checking external database connection..."
+if ! psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM peers;" &>/dev/null; then
+    echo "❌ Cannot connect to external database or no data found"
+    echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
+    echo "   Make sure:"
+    echo "   1. Database server is accessible"
+    echo "   2. Credentials are correct"
+    echo "   3. Database has been restored from backup"
     exit 1
 fi
 
 # Get peer counts from database
-WG0_PEERS=$(docker-compose exec postgres psql -U wgrest -d wgrest_backup -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg0';" | xargs)
-WG1_PEERS=$(docker-compose exec postgres psql -U wgrest -d wgrest_backup -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg1';" | xargs)
+WG0_PEERS=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg0';" | xargs)
+WG1_PEERS=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg1';" | xargs)
 
 echo "📊 Found in database:"
 echo "   wg0: $WG0_PEERS peers"
@@ -47,10 +45,10 @@ echo "📝 Restoring WireGuard configurations..."
 sudo rm -f /etc/wireguard/wg*.conf
 
 # Restore wg0 config
-WG0_CONFIG=$(docker-compose exec postgres psql -U wgrest -d wgrest_backup -t -c "SELECT config_content FROM interfaces WHERE name='wg0';" | sed 's/^[ \t]*//;s/[ \t]*$//')
+WG0_CONFIG=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT config_content FROM interfaces WHERE name='wg0';" | sed 's/^[ \t]*//;s/[ \t]*$//')
 if [ ! -z "$WG0_CONFIG" ] && [ "$WG0_CONFIG" != "" ]; then
     echo "$WG0_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
-    echo "✅ wg0.conf restored"
+    echo "✅ wg0.conf restored from database"
 else
     echo "⚠️  wg0.conf not found in database, creating basic config"
     # Create basic config - will be updated by sync service
@@ -58,20 +56,24 @@ else
 [Interface]
 Address = 10.10.0.1/24
 ListenPort = $WG0_PORT
+PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
 EOF
 fi
 
 # Restore wg1 config
-WG1_CONFIG=$(docker-compose exec postgres psql -U wgrest -d wgrest_backup -t -c "SELECT config_content FROM interfaces WHERE name='wg1';" | sed 's/^[ \t]*//;s/[ \t]*$//')
+WG1_CONFIG=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT config_content FROM interfaces WHERE name='wg1';" | sed 's/^[ \t]*//;s/[ \t]*$//')
 if [ ! -z "$WG1_CONFIG" ] && [ "$WG1_CONFIG" != "" ]; then
     echo "$WG1_CONFIG" | sudo tee /etc/wireguard/wg1.conf > /dev/null
-    echo "✅ wg1.conf restored"
+    echo "✅ wg1.conf restored from database"
 else
     echo "⚠️  wg1.conf not found in database, creating basic config"
     sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
 Address = 10.11.0.1/24
 ListenPort = $WG1_PORT
+PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
 EOF
 fi
 
@@ -102,7 +104,7 @@ echo ""
 echo "✅ Database restoration completed!"
 echo ""
 echo "🔄 The sync service automatically:"
-echo "   1. Read all peer data from PostgreSQL"
+echo "   1. Read all peer data from external PostgreSQL"
 echo "   2. Recreated all peers in wgrest"  
 echo "   3. Updated WireGuard configurations"
 echo "   4. Started all tunnels"

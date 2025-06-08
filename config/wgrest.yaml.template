@@ -1,8 +1,5 @@
-server:
-  host: "0.0.0.0"
-  port: ${WGREST_PORT}
-  api_key: "${WGREST_API_KEY}"
-
+listen: "0.0.0.0:${WGREST_PORT}"
+api_key: "${WGREST_API_KEY}"
 data_dir: "/app/data"
 
 interfaces:
@@ -10,13 +7,7 @@ interfaces:
     config_path: "/etc/wireguard/wg0.conf"
     subnet: "10.10.0.0/24"
     endpoint: "${SERVER_IP}:${WG0_PORT}"
-    description: "FreeRADIUS clients"
   wg1:
     config_path: "/etc/wireguard/wg1.conf"
-    subnet: "10.11.0.0/24"
+    subnet: "10.11.0.0/24" 
     endpoint: "${SERVER_IP}:${WG1_PORT}"
-    description: "MikroTik routers"
-
-logging:
-  level: "info"
-  file: "/app/data/wgrest.log"

@@ -20,8 +20,14 @@ services:
       - SERVER_IP=${SERVER_IP}
       - WG0_PORT=${WG0_PORT}
       - WG1_PORT=${WG1_PORT}
+    entrypoint: []
     command: >
-      sh -c "envsubst < /app/config.yaml.template > /app/config.yaml && /app/wgrest -config /app/config.yaml"
+      sh -c "
+      envsubst < /app/config.yaml.template > /app/config.yaml &&
+      echo 'Generated config:' &&
+      cat /app/config.yaml &&
+      /app/wgrest -config /app/config.yaml
+      "
 
   # WireGuard container - only used for kernel module loading
   wireguard:

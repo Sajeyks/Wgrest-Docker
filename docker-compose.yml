@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # Standard wgrest (built from source)
+  # Standard wgrest (built from source using official structure)
   wgrest:
     build:
       context: ./wgrest-build
@@ -16,7 +16,8 @@ services:
       - wgrest_data:/app/data
     environment:
       - WGREST_CONFIG=/app/config.yaml
-    # ports not needed with network_mode: host
+    # Use the config file option since that's how wgrest expects to run
+    command: ["/app/wgrest", "-config", "/app/config.yaml"]
 
   # WireGuard container - only used for kernel module loading
   # Actual WireGuard interfaces run on host via wgrest

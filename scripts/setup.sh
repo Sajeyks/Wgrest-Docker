@@ -60,6 +60,10 @@ if ! command -v docker-compose &> /dev/null; then
     sudo chmod +x /usr/local/bin/docker-compose
 fi
 
+# Create wgrest-build directory if it doesn't exist
+echo "📁 Setting up wgrest build directory..."
+mkdir -p wgrest-build
+
 # Generate WireGuard keys
 echo "🔑 Generating WireGuard keys..."
 WG0_PRIVATE=$(wg genkey)
@@ -122,20 +126,36 @@ sudo iptables -A INPUT -p tcp --dport $WGREST_PORT -j ACCEPT 2>/dev/null || true
 echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 
-# Start services
-echo "🚀 Starting Docker services..."
-docker-compose up -d
+# Build and start services
+echo "🔨 Building and starting Docker services..."
+echo "   This may take a few minutes as we build wgrest from source..."
+docker-compose up -d --build
 
 # Wait for services
 echo "⏳ Waiting for services to start..."
-sleep 30
+sleep 45  # Give more time for build and startup
 
 # Test wgrest API
 echo "🧪 Testing wgrest API..."
-if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/api/v1/interfaces >/dev/null; then
-    echo "✅ wgrest API is responding"
-else
-    echo "❌ wgrest API is not responding"
+API_RETRIES=0
+MAX_RETRIES=6
+
+while [ $API_RETRIES -lt $MAX_RETRIES ]; do
+    if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/api/v1/interfaces >/dev/null; then
+        echo "✅ wgrest API is responding"
+        break
+    else
+        echo "⏳ wgrest API not ready yet, waiting... (attempt $((API_RETRIES + 1))/$MAX_RETRIES)"
+        sleep 10
+        API_RETRIES=$((API_RETRIES + 1))
+    fi
+done
+
+if [ $API_RETRIES -eq $MAX_RETRIES ]; then
+    echo "❌ wgrest API is not responding after $MAX_RETRIES attempts"
+    echo "📋 Service status:"
+    docker-compose ps
+    echo "📋 wgrest logs:"
     docker-compose logs wgrest
     exit 1
 fi
@@ -143,7 +163,7 @@ fi
 # Check sync service
 echo "🔄 Checking sync service..."
 sleep 10
-if docker-compose logs wgrest-sync | grep -q "Sync completed\|Connected to PostgreSQL"; then
+if docker-compose logs wgrest-sync | grep -q "Sync completed\|Connected to PostgreSQL\|Starting sync"; then
     echo "✅ Sync service is working"
 else
     echo "⚠️  Sync service may still be starting..."

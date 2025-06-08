@@ -64,6 +64,25 @@ fi
 echo "📁 Setting up wgrest build directory..."
 mkdir -p wgrest-build
 
+# Check for existing host installations that might conflict
+echo "🔍 Checking for existing WireGuard/wgrest installations..."
+if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+    echo "⚠️  Stopping existing WireGuard wg0 service..."
+    sudo systemctl stop wg-quick@wg0
+    sudo systemctl disable wg-quick@wg0
+fi
+
+if systemctl is-active --quiet wg-quick@wg1 2>/dev/null; then
+    echo "⚠️  Stopping existing WireGuard wg1 service..."
+    sudo systemctl stop wg-quick@wg1
+    sudo systemctl disable wg-quick@wg1
+fi
+
+if pgrep -f "wgrest" > /dev/null; then
+    echo "⚠️  Stopping existing wgrest processes..."
+    sudo pkill -f "wgrest" || true
+fi
+
 # Stop any existing WireGuard interfaces to avoid port conflicts
 echo "🛑 Stopping existing WireGuard interfaces..."
 sudo wg-quick down wg0 2>/dev/null || true
@@ -79,6 +98,11 @@ fi
 if netstat -ulpn | grep -q ":$WG1_PORT "; then
     echo "⚠️  Port $WG1_PORT is in use. Attempting to free it..."
     sudo fuser -k $WG1_PORT/udp 2>/dev/null || true
+fi
+
+if netstat -tlpn | grep -q ":$WGREST_PORT "; then
+    echo "⚠️  Port $WGREST_PORT is in use. Attempting to free it..."
+    sudo fuser -k $WGREST_PORT/tcp 2>/dev/null || true
 fi
 
 # Generate WireGuard keys
@@ -109,6 +133,14 @@ EOF
 # Create initial WireGuard configs
 echo "📝 Creating initial WireGuard configurations..."
 sudo mkdir -p /etc/wireguard
+
+# Backup existing configs if they exist
+if [ -f /etc/wireguard/wg0.conf ]; then
+    sudo cp /etc/wireguard/wg0.conf /etc/wireguard/wg0.conf.backup.$(date +%s)
+fi
+if [ -f /etc/wireguard/wg1.conf ]; then
+    sudo cp /etc/wireguard/wg1.conf /etc/wireguard/wg1.conf.backup.$(date +%s)
+fi
 
 # wg0 config (FreeRADIUS)
 sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
@@ -167,6 +199,12 @@ while [ $API_RETRIES -lt $MAX_RETRIES ]; do
         break
     else
         echo "⏳ wgrest API not ready yet, waiting... (attempt $((API_RETRIES + 1))/$MAX_RETRIES)"
+        echo "📋 Checking container status..."
+        docker-compose ps
+        if [ $API_RETRIES -eq 2 ]; then
+            echo "📋 wgrest logs:"
+            docker-compose logs --tail=20 wgrest
+        fi
         sleep 10
         API_RETRIES=$((API_RETRIES + 1))
     fi
@@ -178,6 +216,11 @@ if [ $API_RETRIES -eq $MAX_RETRIES ]; then
     docker-compose ps
     echo "📋 wgrest logs:"
     docker-compose logs wgrest
+    echo ""
+    echo "🔍 Troubleshooting suggestions:"
+    echo "   1. Check if the binary was built correctly: docker-compose exec wgrest /app/wgrest --help"
+    echo "   2. Check architecture: docker-compose exec wgrest uname -m"
+    echo "   3. Check for existing processes: ps aux | grep wgrest"
     exit 1
 fi
 

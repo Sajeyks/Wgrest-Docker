@@ -16,12 +16,10 @@ services:
       - wgrest_data:/app/data
     environment:
       - WGREST_CONFIG=/app/config.yaml
-    ports:
-      - "${WGREST_PORT:-8080}:8080"
-    depends_on:
-      - wireguard
+    # ports not needed with network_mode: host
 
-  # WireGuard container
+  # WireGuard container - only used for kernel module loading
+  # Actual WireGuard interfaces run on host via wgrest
   wireguard:
     image: linuxserver/wireguard:latest
     container_name: wireguard
@@ -34,13 +32,13 @@ services:
       - TZ=Europe/London
     volumes:
       - /lib/modules:/lib/modules
-    ports:
-      - "${WG0_PORT:-51820}:51820/udp"
-      - "${WG1_PORT:-51821}:51821/udp"
+    # Remove port mappings - wgrest will handle WireGuard directly on host
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
     restart: unless-stopped
+    # Don't actually start WireGuard interfaces in container
+    command: echo "WireGuard kernel module loaded"
 
   # Sync service: wgrest → External PostgreSQL
   wgrest-sync:

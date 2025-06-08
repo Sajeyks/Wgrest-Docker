@@ -1,9 +1,11 @@
 version: '3.8'
 
 services:
-  # Standard wgrest (file-based)
+  # Standard wgrest (built from source)
   wgrest:
-    image: suquant/wgrest:latest
+    build:
+      context: ./wgrest-build
+      dockerfile: Dockerfile
     container_name: wgrest
     restart: unless-stopped
     network_mode: host

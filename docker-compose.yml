@@ -12,7 +12,7 @@ services:
     privileged: true
     volumes:
       - /etc/wireguard:/etc/wireguard
-      - ./config/wgrest.yaml.template:/app/config.yaml.template
+      - ./config/wgrest.conf.template:/app/config.conf.template
       - wgrest_data:/app/data
     environment:
       - WGREST_PORT=${WGREST_PORT}
@@ -23,10 +23,10 @@ services:
     entrypoint: []
     command: >
       sh -c "
-      envsubst < /app/config.yaml.template > /app/config.yaml &&
+      envsubst < /app/config.conf.template > /app/config.conf &&
       echo 'Generated config:' &&
-      cat /app/config.yaml &&
-      /app/wgrest -config /app/config.yaml
+      cat /app/config.conf &&
+      /app/wgrest --conf /app/config.conf
       "
 
   # WireGuard container - only used for kernel module loading

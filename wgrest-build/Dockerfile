@@ -18,10 +18,11 @@ RUN export appVersion=$(git describe --tags `git rev-list -1 HEAD` 2>/dev/null |
 # Runtime stage
 FROM alpine:3.18
 
-# Install runtime dependencies
+# Install runtime dependencies including envsubst
 RUN apk add --no-cache \
         ca-certificates \
-        wireguard-tools && \
+        wireguard-tools \
+        gettext && \
     rm -rf /var/cache/apk/*
 
 # Create non-root user

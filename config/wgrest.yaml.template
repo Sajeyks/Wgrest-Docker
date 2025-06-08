@@ -1,9 +1,8 @@
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: ${WGREST_PORT}
   api_key: "${WGREST_API_KEY}"
 
-# Configure data directory to use writable location
 data_dir: "/app/data"
 
 interfaces:

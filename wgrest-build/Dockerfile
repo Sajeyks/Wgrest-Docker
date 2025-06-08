@@ -30,7 +30,10 @@ RUN addgroup -g 1000 wgrest && \
 WORKDIR /app
 
 # Copy built binary from builder stage
-COPY --from=builder /app/wgrest /usr/local/bin/wgrest
+COPY --from=builder /app/wgrest /app/wgrest
+
+# Make sure binary is executable
+RUN chmod +x /app/wgrest
 
 # Create data directory
 RUN mkdir -p /app/data && chown -R wgrest:wgrest /app
@@ -40,4 +43,5 @@ USER wgrest
 
 EXPOSE 8080
 
-CMD ["wgrest", "-config", "/app/config.yaml"]
+# Use full path to binary
+CMD ["/app/wgrest", "-config", "/app/config.yaml"]

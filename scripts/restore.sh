@@ -44,6 +44,10 @@ echo "   wg1: $WG1_PEERS peers"
 echo "📝 Restoring WireGuard configurations..."
 sudo rm -f /etc/wireguard/wg*.conf
 
+# Get server keys from database
+WG0_PRIVATE=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT private_key FROM server_keys WHERE interface_name='wg0';" | xargs)
+WG1_PRIVATE=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT private_key FROM server_keys WHERE interface_name='wg1';" | xargs)
+
 # Restore wg0 config
 WG0_CONFIG=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT config_content FROM interfaces WHERE name='wg0';" | sed 's/^[ \t]*//;s/[ \t]*$//')
 if [ ! -z "$WG0_CONFIG" ] && [ "$WG0_CONFIG" != "" ]; then
@@ -51,14 +55,16 @@ if [ ! -z "$WG0_CONFIG" ] && [ "$WG0_CONFIG" != "" ]; then
     echo "✅ wg0.conf restored from database"
 else
     echo "⚠️  wg0.conf not found in database, creating basic config"
-    # Create basic config - will be updated by sync service
-    sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
+    if [ ! -z "$WG0_PRIVATE" ]; then
+        sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
 [Interface]
+PrivateKey = $WG0_PRIVATE
 Address = 10.10.0.1/24
 ListenPort = $WG0_PORT
 PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
 EOF
+    fi
 fi
 
 # Restore wg1 config
@@ -68,13 +74,16 @@ if [ ! -z "$WG1_CONFIG" ] && [ "$WG1_CONFIG" != "" ]; then
     echo "✅ wg1.conf restored from database"
 else
     echo "⚠️  wg1.conf not found in database, creating basic config"
-    sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
+    if [ ! -z "$WG1_PRIVATE" ]; then
+        sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
+PrivateKey = $WG1_PRIVATE
 Address = 10.11.0.1/24
 ListenPort = $WG1_PORT
 PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
 EOF
+    fi
 fi
 
 # Set permissions
@@ -96,7 +105,7 @@ sleep 30
 echo "🧪 Verifying restoration..."
 for interface in wg0 wg1; do
     PEER_COUNT=$(curl -s -H "Authorization: Bearer $WGREST_API_KEY" \
-                      "http://localhost:8080/api/v1/interfaces/$interface/peers" 2>/dev/null | jq length 2>/dev/null || echo "0")
+                      "http://localhost:$WGREST_PORT/api/v1/interfaces/$interface/peers" 2>/dev/null | jq length 2>/dev/null || echo "0")
     echo "Interface $interface: $PEER_COUNT peers restored via API"
 done
 
@@ -109,4 +118,4 @@ echo "   2. Recreated all peers in wgrest"
 echo "   3. Updated WireGuard configurations"
 echo "   4. Started all tunnels"
 echo ""
-echo "🧪 Verify with: curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:8080/api/v1/interfaces"
+echo "🧪 Verify with: curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/api/v1/interfaces"

@@ -9,9 +9,10 @@ RUN apk add --no-cache git
 # Clone wgrest repository
 RUN git clone https://github.com/suquant/wgrest.git .
 
-# Build the application
-RUN go mod download && \
-    go build -o wgrest ./cmd/wgrest
+# Check the repository structure and build
+RUN ls -la && \
+    go mod download && \
+    go build -o wgrest .
 
 # Runtime stage
 FROM alpine:3.18

@@ -64,6 +64,23 @@ fi
 echo "📁 Setting up wgrest build directory..."
 mkdir -p wgrest-build
 
+# Stop any existing WireGuard interfaces to avoid port conflicts
+echo "🛑 Stopping existing WireGuard interfaces..."
+sudo wg-quick down wg0 2>/dev/null || true
+sudo wg-quick down wg1 2>/dev/null || true
+
+# Check for port conflicts
+echo "🔍 Checking for port conflicts..."
+if netstat -ulpn | grep -q ":$WG0_PORT "; then
+    echo "⚠️  Port $WG0_PORT is in use. Attempting to free it..."
+    sudo fuser -k $WG0_PORT/udp 2>/dev/null || true
+fi
+
+if netstat -ulpn | grep -q ":$WG1_PORT "; then
+    echo "⚠️  Port $WG1_PORT is in use. Attempting to free it..."
+    sudo fuser -k $WG1_PORT/udp 2>/dev/null || true
+fi
+
 # Generate WireGuard keys
 echo "🔑 Generating WireGuard keys..."
 WG0_PRIVATE=$(wg genkey)
@@ -125,6 +142,10 @@ sudo iptables -A INPUT -p tcp --dport $WGREST_PORT -j ACCEPT 2>/dev/null || true
 # Enable IP forwarding
 echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
+
+# Clean up any existing containers
+echo "🧹 Cleaning up existing containers..."
+docker-compose down 2>/dev/null || true
 
 # Build and start services
 echo "🔨 Building and starting Docker services..."

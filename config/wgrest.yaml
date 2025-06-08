@@ -1,20 +1,23 @@
 server:
   host: "0.0.0.0"
-  port: "${WGREST_PORT}"
+  port: 8080
   api_key: "${WGREST_API_KEY}"
+
+# Configure data directory to use writable location
+data_dir: "/app/data"
 
 interfaces:
   wg0:
     config_path: "/etc/wireguard/wg0.conf"
-    subnet: "${WG0_SUBNET}"
+    subnet: "10.10.0.0/24"
     endpoint: "${SERVER_IP}:${WG0_PORT}"
     description: "FreeRADIUS clients"
   wg1:
     config_path: "/etc/wireguard/wg1.conf"
-    subnet: "${WG1_SUBNET}"
+    subnet: "10.11.0.0/24"
     endpoint: "${SERVER_IP}:${WG1_PORT}"
     description: "MikroTik routers"
 
 logging:
   level: "info"
-  file: "/var/log/wgrest.log"
+  file: "/app/data/wgrest.log"

@@ -15,10 +15,16 @@ import schedule
 from datetime import datetime
 
 # Configuration
-WGREST_API_URL = os.getenv('WGREST_API_URL', 'http://localhost:51822')
+WGREST_PORT = os.getenv('WGREST_PORT', '51822')
+WGREST_API_URL = os.getenv('WGREST_API_URL', f'http://localhost:{WGREST_PORT}')
 WGREST_API_KEY = os.getenv('WGREST_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL', 60))
+
+# Environment variables for config parsing
+SERVER_IP = os.getenv('SERVER_IP', 'localhost')
+WG0_PORT = os.getenv('WG0_PORT', '51820')
+WG1_PORT = os.getenv('WG1_PORT', '51821')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -71,6 +77,39 @@ class WgrestSyncService:
             logger.error(f"Failed to fetch wgrest data: {e}")
             return None, None
             
+    def parse_wireguard_config(self, config_content, interface_name):
+        """Parse WireGuard config to extract interface details"""
+        if not config_content:
+            return {}
+            
+        details = {}
+        lines = config_content.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if '=' in line and not line.startswith('#'):
+                key, value = line.split('=', 1)
+                key = key.strip().lower()
+                value = value.strip()
+                
+                if key == 'address':
+                    details['address'] = value
+                elif key == 'listenport':
+                    details['listen_port'] = int(value)
+                elif key == 'privatekey':
+                    details['private_key'] = value
+                    
+        # Set subnet based on address
+        if 'address' in details:
+            if interface_name == 'wg0':
+                details['subnet'] = '10.10.0.0/24'
+                details['endpoint'] = f"{SERVER_IP}:{WG0_PORT}"
+            elif interface_name == 'wg1':
+                details['subnet'] = '10.11.0.0/24'
+                details['endpoint'] = f"{SERVER_IP}:{WG1_PORT}"
+                
+        return details
+        
     def read_wireguard_configs(self):
         """Read WireGuard config files"""
         configs = {}
@@ -99,8 +138,12 @@ class WgrestSyncService:
         try:
             with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 
-                # Sync interfaces (devices)
+                # Sync interfaces (devices) with enhanced data extraction
                 for interface_name, interface_data in interfaces.items():
+                    # Parse config file for additional details
+                    config_content = configs.get(interface_name, '')
+                    config_details = self.parse_wireguard_config(config_content, interface_name)
+                    
                     cur.execute("""
                         INSERT INTO interfaces (name, private_key, public_key, address, listen_port, subnet, endpoint, config_content)
                         VALUES (%(name)s, %(private_key)s, %(public_key)s, %(address)s, %(listen_port)s, %(subnet)s, %(endpoint)s, %(config_content)s)
@@ -115,13 +158,13 @@ class WgrestSyncService:
                             last_updated = CURRENT_TIMESTAMP
                     """, {
                         'name': interface_name,
-                        'private_key': '',  # wgrest API doesn't expose private keys
-                        'public_key': interface_data.get('public_key', ''),
-                        'address': '',  # Extract from config if needed
-                        'listen_port': interface_data.get('listen_port', 0),
-                        'subnet': '',  # Extract from config if needed
-                        'endpoint': '',  # Extract from config if needed
-                        'config_content': configs.get(interface_name, '')
+                        'private_key': config_details.get('private_key', ''),  # From config file
+                        'public_key': interface_data.get('public_key', ''),   # From wgrest API
+                        'address': config_details.get('address', ''),         # From config file
+                        'listen_port': interface_data.get('listen_port', config_details.get('listen_port', 0)),  # Prefer API, fallback to config
+                        'subnet': config_details.get('subnet', ''),           # From our parsing
+                        'endpoint': config_details.get('endpoint', ''),       # From our parsing
+                        'config_content': config_content                      # Full config file
                     })
                 
                 # Clear existing peers for clean sync

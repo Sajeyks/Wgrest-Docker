@@ -15,7 +15,7 @@ import schedule
 from datetime import datetime
 
 # Configuration
-WGREST_API_URL = os.getenv('WGREST_API_URL', 'http://localhost:8080')
+WGREST_API_URL = os.getenv('WGREST_API_URL', 'http://localhost:51822')
 WGREST_API_KEY = os.getenv('WGREST_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL', 60))
@@ -39,23 +39,29 @@ class WgrestSyncService:
             raise
             
     def get_wgrest_data(self):
-        """Fetch complete state from wgrest API"""
+        """Fetch complete state from wgrest API using correct endpoints"""
         try:
-            # Get interfaces
-            interfaces_resp = requests.get(f"{WGREST_API_URL}/api/v1/interfaces", headers=self.headers)
-            interfaces_resp.raise_for_status()
-            interfaces = interfaces_resp.json()
+            # Get devices (interfaces) - correct endpoint
+            devices_resp = requests.get(f"{WGREST_API_URL}/v1/devices/", headers=self.headers)
+            devices_resp.raise_for_status()
+            devices = devices_resp.json()
             
-            # Get peers for each interface
+            # Convert devices list to dict for compatibility
+            interfaces = {}
+            for device in devices:
+                interfaces[device['name']] = device
+            
+            # Get peers for each interface using correct endpoints
             all_peers = {}
-            for interface_name in ['wg0', 'wg1']:
+            for device_name in ['wg0', 'wg1']:
                 try:
-                    peers_resp = requests.get(f"{WGREST_API_URL}/api/v1/interfaces/{interface_name}/peers", headers=self.headers)
+                    peers_resp = requests.get(f"{WGREST_API_URL}/v1/devices/{device_name}/peers/", headers=self.headers)
                     peers_resp.raise_for_status()
-                    all_peers[interface_name] = peers_resp.json()
+                    all_peers[device_name] = peers_resp.json()
                 except requests.exceptions.HTTPError as e:
                     if e.response.status_code == 404:
-                        all_peers[interface_name] = []
+                        all_peers[device_name] = []
+                        logger.warning(f"Device {device_name} not found, assuming no peers")
                     else:
                         raise
                         
@@ -93,7 +99,7 @@ class WgrestSyncService:
         try:
             with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 
-                # Sync interfaces
+                # Sync interfaces (devices)
                 for interface_name, interface_data in interfaces.items():
                     cur.execute("""
                         INSERT INTO interfaces (name, private_key, public_key, address, listen_port, subnet, endpoint, config_content)
@@ -109,12 +115,12 @@ class WgrestSyncService:
                             last_updated = CURRENT_TIMESTAMP
                     """, {
                         'name': interface_name,
-                        'private_key': interface_data.get('private_key', ''),
+                        'private_key': '',  # wgrest API doesn't expose private keys
                         'public_key': interface_data.get('public_key', ''),
-                        'address': interface_data.get('address', ''),
+                        'address': '',  # Extract from config if needed
                         'listen_port': interface_data.get('listen_port', 0),
-                        'subnet': interface_data.get('subnet', ''),
-                        'endpoint': interface_data.get('endpoint', ''),
+                        'subnet': '',  # Extract from config if needed
+                        'endpoint': '',  # Extract from config if needed
                         'config_content': configs.get(interface_name, '')
                     })
                 
@@ -132,13 +138,13 @@ class WgrestSyncService:
                                    %(allowed_ips)s, %(endpoint)s, %(persistent_keepalive)s, %(enabled)s, %(preshared_key)s)
                         """, {
                             'interface_name': interface_name,
-                            'name': peer.get('name', ''),
-                            'private_key': peer.get('private_key', ''),
+                            'name': peer.get('url_safe_public_key', peer.get('public_key', ''))[:50],  # Use public key as name
+                            'private_key': '',  # wgrest doesn't store client private keys
                             'public_key': peer.get('public_key', ''),
                             'allowed_ips': json.dumps(peer.get('allowed_ips', [])),
                             'endpoint': peer.get('endpoint'),
-                            'persistent_keepalive': peer.get('persistent_keepalive'),
-                            'enabled': peer.get('enabled', True),
+                            'persistent_keepalive': None,  # Parse from persistent_keepalive_interval if needed
+                            'enabled': True,
                             'preshared_key': peer.get('preshared_key')
                         })
                         total_peers += 1

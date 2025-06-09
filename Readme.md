@@ -337,31 +337,43 @@ Set up automated backups of your external PostgreSQL database:
 0 3 * * 0 find /backups -name "wireguard_*.sql" -mtime +30 -delete
 ```
 
-### **Django Triggered Backup Setup**
+### **Event Driven Backup Setup**
 
 - Django can trigger sync via HTTP POST to :8090/sync
 - Authenticated with same API key
 - Perfect for immediate sync after peer creation
 
-🚀 **Usage Examples:
-Django Integration:**
+🚀 **Usage Examples:**
 
-```py
-# After creating a peer in Django, trigger immediate sync
-import requests
+1. **Django Integration:**
 
-def create_peer_and_sync(peer_data):
-    # Create peer via wgrest
-    peer = wgrest_api.create_peer(peer_data)
-    
-    # Trigger immediate backup sync
-    requests.post(
-        'http://your-server:8090/sync',
-        headers={'Authorization': f'Bearer {WGREST_API_KEY}'}
-    )
-    
-    return peer
-```
+     ```py
+     # After creating a peer in Django, trigger immediate sync
+     import requests
+
+     def create_peer_and_sync(peer_data):
+     # Create peer via wgrest
+     peer = wgrest_api.create_peer(peer_data)
+     
+     # Trigger immediate backup sync
+     requests.post(
+          'http://your-server:8090/sync',
+          headers={'Authorization': f'Bearer {WGREST_API_KEY}'}
+     )
+     
+     return peer
+     ```
+
+2. **Manual Sync Trigger:**
+
+     ```bash
+     # Trigger sync from command line
+     curl -X POST http://localhost:8090/sync \
+          -H "Authorization: Bearer $WGREST_API_KEY"
+
+     # Check sync service health
+     curl http://localhost:8090/health
+     ```
 
 ### **Backup Verification**
 

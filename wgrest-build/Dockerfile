@@ -22,28 +22,22 @@ FROM alpine:3.18
 RUN apk add --no-cache \
         ca-certificates \
         wireguard-tools \
-        gettext && \
+        gettext \
+        iptables && \
     rm -rf /var/cache/apk/*
-
-# Create non-root user
-RUN addgroup -g 1001 wgrest && \
-    adduser -D -s /bin/sh -u 1001 -G wgrest wgrest
 
 WORKDIR /app
 
 # Copy built binary from builder stage
 COPY --from=build-env /app/wgrest /app/wgrest
 
-# Make executable and change ownership
-RUN chmod +x /app/wgrest && \
-    chown wgrest:wgrest /app/wgrest
+# Make executable - keep as root for WireGuard access
+RUN chmod +x /app/wgrest
 
 # Create data directories that wgrest needs
-RUN mkdir -p /app/data /var/lib/wgrest && \
-    chown -R wgrest:wgrest /app /var/lib/wgrest
+RUN mkdir -p /app/data /var/lib/wgrest
 
-# Switch to non-root user
-USER wgrest
+# DO NOT switch to non-root user - wgrest needs root to manage WireGuard
 
 EXPOSE 8080
 

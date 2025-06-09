@@ -11,6 +11,21 @@ fi
 
 source .env
 
+# Validate TARGET_WEBSITE_IP
+if [ -z "$TARGET_WEBSITE_IP" ]; then
+    echo "❌ TARGET_WEBSITE_IP not set in .env file"
+    echo "   Please add: TARGET_WEBSITE_IP=1.2.3.4"
+    exit 1
+fi
+
+echo "📋 Configuration loaded:"
+echo "   Server IP: $SERVER_IP"
+echo "   WG0 Port: $WG0_PORT"
+echo "   WG1 Port: $WG1_PORT"
+echo "   wgrest Port: $WGREST_PORT"
+echo "   Target Website IP: $TARGET_WEBSITE_IP"
+echo ""
+
 # Test external database connection
 echo "🔍 Testing external database connection..."
 if ! psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT 1;" &>/dev/null; then
@@ -152,7 +167,7 @@ PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; 
 PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
 EOF
 
-# wg1 config (MikroTik)  
+# wg1 config (MikroTik) - FIXED to use TARGET_WEBSITE_IP
 sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
 PrivateKey = $WG1_PRIVATE
@@ -164,6 +179,34 @@ EOF
 
 # Set permissions
 sudo chmod 600 /etc/wireguard/wg*.conf
+
+# Start WireGuard interfaces
+echo "🚀 Starting WireGuard interfaces..."
+
+# Stop any existing interfaces first
+sudo wg-quick down wg0 2>/dev/null || true
+sudo wg-quick down wg1 2>/dev/null || true
+
+# Start wg0
+if sudo wg-quick up wg0; then
+    echo "✅ wg0 interface started successfully"
+else
+    echo "❌ Failed to start wg0 interface"
+    exit 1
+fi
+
+# Start wg1
+if sudo wg-quick up wg1; then
+    echo "✅ wg1 interface started successfully"
+else
+    echo "❌ Failed to start wg1 interface"
+    exit 1
+fi
+
+# Enable interfaces to start on boot
+echo "🔄 Enabling WireGuard interfaces to start on boot..."
+sudo systemctl enable wg-quick@wg0
+sudo systemctl enable wg-quick@wg1
 
 # Setup iptables rules
 echo "🔥 Setting up firewall rules..."
@@ -194,7 +237,7 @@ API_RETRIES=0
 MAX_RETRIES=6
 
 while [ $API_RETRIES -lt $MAX_RETRIES ]; do
-    if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/api/v1/interfaces >/dev/null; then
+    if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/v1/devices/ >/dev/null; then
         echo "✅ wgrest API is responding"
         break
     else
@@ -243,6 +286,10 @@ echo "   🔑 API Key: $WGREST_API_KEY"
 echo "   🔑 wg0 Public Key: $WG0_PUBLIC"
 echo "   🔑 wg1 Public Key: $WG1_PUBLIC"
 echo "   🗄️  External Database: $DB_HOST:$DB_PORT/$DB_NAME"
+echo "   🎯 Target Website IP: $TARGET_WEBSITE_IP"
+echo ""
+echo "🔗 WireGuard Interface Status:"
+sudo wg show
 echo ""
 echo "🔧 Next steps:"
 echo "   1. Configure your Django app to use this wgrest API"
@@ -251,67 +298,4 @@ echo "   3. Database automatically syncs every 60 seconds"
 echo ""
 echo "💾 Backup strategy:"
 echo "   - Backup external PostgreSQL database: pg_dump $DB_NAME"
-echo "   - Restoration: restore database + run './scripts/restore.sh'"
-```iptables -t nat -A POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
-EOF
-
-# Set permissions
-sudo chmod 600 /etc/wireguard/wg*.conf
-
-# Setup iptables rules
-echo "🔥 Setting up firewall rules..."
-sudo iptables -A INPUT -p udp --dport $WG0_PORT -j ACCEPT 2>/dev/null || true
-sudo iptables -A INPUT -p udp --dport $WG1_PORT -j ACCEPT 2>/dev/null || true
-sudo iptables -A INPUT -p tcp --dport $WGREST_PORT -j ACCEPT 2>/dev/null || true
-
-# Enable IP forwarding
-echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
-sudo sysctl -p
-
-# Start services
-echo "🚀 Starting Docker services..."
-docker-compose up -d
-
-# Wait for services
-echo "⏳ Waiting for services to start..."
-sleep 30
-
-# Test wgrest API
-echo "🧪 Testing wgrest API..."
-if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/api/v1/interfaces >/dev/null; then
-    echo "✅ wgrest API is responding"
-else
-    echo "❌ wgrest API is not responding"
-    docker-compose logs wgrest
-    exit 1
-fi
-
-# Check sync service
-echo "🔄 Checking sync service..."
-sleep 10
-if docker-compose logs wgrest-sync | grep -q "Sync completed"; then
-    echo "✅ Sync service is working"
-else
-    echo "⚠️  Sync service may still be starting..."
-    docker-compose logs wgrest-sync
-fi
-
-echo ""
-echo "🎉 Setup completed successfully!"
-echo ""
-echo "📊 Your WireGuard server details:"
-echo "   🌐 wgrest API: http://$SERVER_IP:$WGREST_PORT"
-echo "   🔑 API Key: $WGREST_API_KEY"
-echo "   🔑 wg0 Public Key: $WG0_PUBLIC"
-echo "   🔑 wg1 Public Key: $WG1_PUBLIC"
-echo "   🗄️  Database: localhost:5432/wgrest_backup"
-echo ""
-echo "🔧 Next steps:"
-echo "   1. Configure your Django app to use this wgrest API"
-echo "   2. Create peers via Django -> wgrest API"
-echo "   3. Database automatically syncs every 60 seconds"
-echo ""
-echo "💾 Backup strategy:"
-echo "   - Backup PostgreSQL database: pg_dump wgrest_backup"
 echo "   - Restoration: restore database + run './scripts/restore.sh'"

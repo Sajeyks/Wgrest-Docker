@@ -14,7 +14,18 @@ fi
 
 source .env
 
+# Validate TARGET_WEBSITE_IP
+if [ -z "$TARGET_WEBSITE_IP" ]; then
+    echo "❌ TARGET_WEBSITE_IP not set in .env file"
+    echo "   Please add: TARGET_WEBSITE_IP=1.2.3.4"
+    exit 1
+fi
+
 echo "🔄 Starting restoration from external database..."
+echo "📋 Configuration:"
+echo "   Target Website IP: $TARGET_WEBSITE_IP"
+echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
+echo ""
 
 # Stop services
 echo "Stopping services..."
@@ -67,7 +78,7 @@ EOF
     fi
 fi
 
-# Restore wg1 config
+# Restore wg1 config - FIXED to use TARGET_WEBSITE_IP
 WG1_CONFIG=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT config_content FROM interfaces WHERE name='wg1';" | sed 's/^[ \t]*//;s/[ \t]*$//')
 if [ ! -z "$WG1_CONFIG" ] && [ "$WG1_CONFIG" != "" ]; then
     echo "$WG1_CONFIG" | sudo tee /etc/wireguard/wg1.conf > /dev/null
@@ -89,6 +100,30 @@ fi
 # Set permissions
 sudo chmod 600 /etc/wireguard/wg*.conf
 
+# Start WireGuard interfaces manually (before Docker services)
+echo "🚀 Starting WireGuard interfaces..."
+
+# Stop any existing interfaces first
+sudo wg-quick down wg0 2>/dev/null || true
+sudo wg-quick down wg1 2>/dev/null || true
+
+# Start interfaces
+if [ -f /etc/wireguard/wg0.conf ]; then
+    if sudo wg-quick up wg0; then
+        echo "✅ wg0 interface started successfully"
+    else
+        echo "⚠️  wg0 interface start failed, but continuing..."
+    fi
+fi
+
+if [ -f /etc/wireguard/wg1.conf ]; then
+    if sudo wg-quick up wg1; then
+        echo "✅ wg1 interface started successfully" 
+    else
+        echo "⚠️  wg1 interface start failed, but continuing..."
+    fi
+fi
+
 # Start all services
 echo "🚀 Starting all services..."
 docker-compose up -d
@@ -105,7 +140,7 @@ sleep 30
 echo "🧪 Verifying restoration..."
 for interface in wg0 wg1; do
     PEER_COUNT=$(curl -s -H "Authorization: Bearer $WGREST_API_KEY" \
-                      "http://localhost:$WGREST_PORT/api/v1/interfaces/$interface/peers" 2>/dev/null | jq length 2>/dev/null || echo "0")
+                      "http://localhost:$WGREST_PORT/v1/devices/$interface/peers/" 2>/dev/null | jq length 2>/dev/null || echo "0")
     echo "Interface $interface: $PEER_COUNT peers restored via API"
 done
 
@@ -118,4 +153,7 @@ echo "   2. Recreated all peers in wgrest"
 echo "   3. Updated WireGuard configurations"
 echo "   4. Started all tunnels"
 echo ""
-echo "🧪 Verify with: curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/api/v1/interfaces"
+echo "🔗 WireGuard Interface Status:"
+sudo wg show
+echo ""
+echo "🧪 Verify with: curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/v1/devices/"

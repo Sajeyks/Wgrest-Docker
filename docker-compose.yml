@@ -51,7 +51,7 @@ services:
     environment:
       - PUID=0  # Run as root
       - PGID=0  # Run as root group
-      - TZ=Europe/London
+      - TZ=Africa/Nairobi
     volumes:
       - /lib/modules:/lib/modules
       - /dev/net/tun:/dev/net/tun

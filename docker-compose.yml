@@ -11,13 +11,16 @@ services:
     network_mode: host
     privileged: true
     cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
+      - ALL
+    security_opt:
+      - seccomp:unconfined
     volumes:
       - /etc/wireguard:/etc/wireguard
       - ./config/wgrest.conf.template:/app/config.conf.template
       - wgrest_data:/app/data
-      - /dev/net/tun:/dev/net/tun
+      - /dev:/dev
+      - /sys:/sys
+      - /proc:/proc
     environment:
       - WGREST_PORT=${WGREST_PORT}
       - WGREST_API_KEY=${WGREST_API_KEY}
@@ -32,6 +35,9 @@ services:
       envsubst < /app/config.conf.template > /app/config.conf &&
       echo 'Generated config:' &&
       cat /app/config.conf &&
+      echo 'Running as:' && whoami &&
+      echo 'Checking WireGuard access...' &&
+      wg show || echo 'WireGuard not accessible yet' &&
       /app/wgrest --conf /app/config.conf
       "
 
@@ -72,6 +78,9 @@ services:
       - WGREST_API_KEY=${WGREST_API_KEY}
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
       - SYNC_INTERVAL=60
+      - SERVER_IP=${SERVER_IP}
+      - WG0_PORT=${WG0_PORT}
+      - WG1_PORT=${WG1_PORT}
     volumes:
       - /etc/wireguard:/etc/wireguard:ro
       - wgrest_data:/app/wgrest_data:ro

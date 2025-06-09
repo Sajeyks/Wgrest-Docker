@@ -10,16 +10,22 @@ services:
     restart: unless-stopped
     network_mode: host
     privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
     volumes:
       - /etc/wireguard:/etc/wireguard
       - ./config/wgrest.conf.template:/app/config.conf.template
       - wgrest_data:/app/data
+      - /dev/net/tun:/dev/net/tun
     environment:
       - WGREST_PORT=${WGREST_PORT}
       - WGREST_API_KEY=${WGREST_API_KEY}
       - SERVER_IP=${SERVER_IP}
       - WG0_PORT=${WG0_PORT}
       - WG1_PORT=${WG1_PORT}
+    depends_on:
+      - wireguard
     entrypoint: []
     command: >
       sh -c "
@@ -29,7 +35,7 @@ services:
       /app/wgrest --conf /app/config.conf
       "
 
-  # WireGuard container - only used for kernel module loading
+  # WireGuard container - loads kernel modules and stays running
   wireguard:
     image: linuxserver/wireguard:latest
     container_name: wireguard
@@ -37,16 +43,24 @@ services:
       - NET_ADMIN
       - SYS_MODULE
     environment:
-      - PUID=1000
-      - PGID=1000
+      - PUID=0  # Run as root
+      - PGID=0  # Run as root group
       - TZ=Europe/London
     volumes:
       - /lib/modules:/lib/modules
+      - /dev/net/tun:/dev/net/tun
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
     restart: unless-stopped
-    command: echo "WireGuard kernel module loaded"
+    command: >
+      sh -c "
+      echo 'Loading WireGuard kernel module...' &&
+      modprobe wireguard &&
+      echo 'WireGuard kernel module loaded successfully' &&
+      echo 'Keeping container running for ongoing management...' &&
+      sleep infinity
+      "
 
   # Sync service: wgrest → External PostgreSQL
   wgrest-sync:

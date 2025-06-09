@@ -14,6 +14,13 @@ fi
 
 source .env
 
+# Set PostgreSQL environment variables to avoid password prompts
+export PGHOST=$DB_HOST
+export PGPORT=$DB_PORT
+export PGUSER=$DB_USER
+export PGPASSWORD=$DB_PASSWORD
+export PGDATABASE=$DB_NAME
+
 # Validate TARGET_WEBSITE_IP
 if [ -z "$TARGET_WEBSITE_IP" ]; then
     echo "❌ TARGET_WEBSITE_IP not set in .env file"
@@ -33,19 +40,20 @@ docker-compose down
 
 # Check external database connection
 echo "🔍 Checking external database connection..."
-if ! psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM peers;" &>/dev/null; then
+if ! psql -c "SELECT COUNT(*) FROM peers;" &>/dev/null; then
     echo "❌ Cannot connect to external database or no data found"
     echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
     echo "   Make sure:"
     echo "   1. Database server is accessible"
     echo "   2. Credentials are correct"
     echo "   3. Database has been restored from backup"
+    echo "   4. Password in .env file is correct"
     exit 1
 fi
 
 # Get peer counts from database
-WG0_PEERS=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg0';" | xargs)
-WG1_PEERS=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg1';" | xargs)
+WG0_PEERS=$(psql -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg0';" | xargs)
+WG1_PEERS=$(psql -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg1';" | xargs)
 
 echo "📊 Found in database:"
 echo "   wg0: $WG0_PEERS peers"
@@ -56,11 +64,11 @@ echo "📝 Restoring WireGuard configurations..."
 sudo rm -f /etc/wireguard/wg*.conf
 
 # Get server keys from database
-WG0_PRIVATE=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT private_key FROM server_keys WHERE interface_name='wg0';" | xargs)
-WG1_PRIVATE=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT private_key FROM server_keys WHERE interface_name='wg1';" | xargs)
+WG0_PRIVATE=$(psql -t -c "SELECT private_key FROM server_keys WHERE interface_name='wg0';" | xargs)
+WG1_PRIVATE=$(psql -t -c "SELECT private_key FROM server_keys WHERE interface_name='wg1';" | xargs)
 
 # Restore wg0 config
-WG0_CONFIG=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT config_content FROM interfaces WHERE name='wg0';" | sed 's/^[ \t]*//;s/[ \t]*$//')
+WG0_CONFIG=$(psql -t -c "SELECT config_content FROM interfaces WHERE name='wg0';" | sed 's/^[ \t]*//;s/[ \t]*$//')
 if [ ! -z "$WG0_CONFIG" ] && [ "$WG0_CONFIG" != "" ]; then
     echo "$WG0_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
     echo "✅ wg0.conf restored from database"
@@ -79,7 +87,7 @@ EOF
 fi
 
 # Restore wg1 config - FIXED to use TARGET_WEBSITE_IP
-WG1_CONFIG=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT config_content FROM interfaces WHERE name='wg1';" | sed 's/^[ \t]*//;s/[ \t]*$//')
+WG1_CONFIG=$(psql -t -c "SELECT config_content FROM interfaces WHERE name='wg1';" | sed 's/^[ \t]*//;s/[ \t]*$//')
 if [ ! -z "$WG1_CONFIG" ] && [ "$WG1_CONFIG" != "" ]; then
     echo "$WG1_CONFIG" | sudo tee /etc/wireguard/wg1.conf > /dev/null
     echo "✅ wg1.conf restored from database"

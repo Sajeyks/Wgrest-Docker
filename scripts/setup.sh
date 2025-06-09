@@ -11,6 +11,13 @@ fi
 
 source .env
 
+# Set PostgreSQL environment variables to avoid password prompts
+export PGHOST=$DB_HOST
+export PGPORT=$DB_PORT
+export PGUSER=$DB_USER
+export PGPASSWORD=$DB_PASSWORD
+export PGDATABASE=$DB_NAME
+
 # Validate TARGET_WEBSITE_IP
 if [ -z "$TARGET_WEBSITE_IP" ]; then
     echo "❌ TARGET_WEBSITE_IP not set in .env file"
@@ -28,7 +35,7 @@ echo ""
 
 # Test external database connection
 echo "🔍 Testing external database connection..."
-if ! psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT 1;" &>/dev/null; then
+if ! psql -c "SELECT 1;" &>/dev/null; then
     echo "❌ Cannot connect to external database"
     echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
     echo "   User: $DB_USER"
@@ -38,20 +45,21 @@ if ! psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT 1;" &>/dev/
     echo "   2. Database '$DB_NAME' exists"
     echo "   3. User '$DB_USER' has access to the database"
     echo "   4. Network connectivity is working"
+    echo "   5. Password in .env file is correct"
     echo ""
     echo "To create the database schema, run:"
-    echo "   psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f sql/init.sql"
+    echo "   psql -f sql/init.sql"
     exit 1
 fi
 
 echo "✅ External database connection successful"
 
 # Check if database schema exists
-TABLES_EXIST=$(psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN ('interfaces', 'peers', 'server_keys', 'sync_status');" | xargs)
+TABLES_EXIST=$(psql -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN ('interfaces', 'peers', 'server_keys', 'sync_status');" | xargs)
 
 if [ "$TABLES_EXIST" -lt 4 ]; then
     echo "🗄️  Setting up database schema..."
-    if ! psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f sql/init.sql; then
+    if ! psql -f sql/init.sql; then
         echo "❌ Failed to create database schema"
         exit 1
     fi
@@ -129,7 +137,7 @@ WG1_PUBLIC=$(echo $WG1_PRIVATE | wg pubkey)
 
 # Store keys in database
 echo "💾 Storing server keys in database..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << EOF
+psql << EOF
 INSERT INTO server_keys (interface_name, private_key, public_key) 
 VALUES ('wg0', '$WG0_PRIVATE', '$WG0_PUBLIC')
 ON CONFLICT (interface_name) DO UPDATE SET

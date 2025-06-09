@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Event-driven wgrest → PostgreSQL sync service with webhook endpoint
-Syncs on initial startup, file changes, and API webhook calls
+Event-driven wgrest → PostgreSQL sync service with structured data storage
+Stores only structured data, reconstructs config files during restoration
 """
 
 import json
@@ -50,6 +50,7 @@ CLEANUP_TIME = os.getenv('CLEANUP_TIME', '02:00')
 SERVER_IP = os.getenv('SERVER_IP', 'localhost')
 WG0_PORT = os.getenv('WG0_PORT', '51820')
 WG1_PORT = os.getenv('WG1_PORT', '51821')
+TARGET_WEBSITE_IP = os.getenv('TARGET_WEBSITE_IP', '127.0.0.1')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -62,14 +63,22 @@ class EncryptionHelper:
         self.cipher = Fernet(key)
     
     def encrypt(self, data):
-        if not data:
+        if not data or data == '':
             return None
-        return self.cipher.encrypt(data.encode()).decode()
+        try:
+            return self.cipher.encrypt(data.encode()).decode()
+        except Exception as e:
+            logger.error(f"Encryption failed: {e}")
+            return None
     
     def decrypt(self, encrypted_data):
         if not encrypted_data:
             return None
-        return self.cipher.decrypt(encrypted_data.encode()).decode()
+        try:
+            return self.cipher.decrypt(encrypted_data.encode()).decode()
+        except Exception as e:
+            logger.error(f"Decryption failed: {e}")
+            return None
 
 class WireGuardFileHandler(FileSystemEventHandler):
     def __init__(self, sync_service):
@@ -111,7 +120,7 @@ class WgrestSyncService:
         try:
             self.conn = psycopg2.connect(DATABASE_URL)
             self.conn.autocommit = True
-            logger.info("Connected to PostgreSQL with encryption enabled")
+            logger.info("Connected to PostgreSQL with structured data encryption")
         except Exception as e:
             logger.error(f"Database connection failed: {e}")
             raise
@@ -130,7 +139,6 @@ class WgrestSyncService:
             logger.error(f"Failed to setup file monitoring: {e}")
     
     def setup_webhook_server(self):
-        """Setup webhook server to receive sync triggers"""
         if not WEBHOOK_ENABLED:
             return
             
@@ -139,12 +147,10 @@ class WgrestSyncService:
         @app.route('/sync', methods=['POST'])
         def webhook_sync():
             try:
-                # Verify webhook auth
                 auth_header = request.headers.get('Authorization')
                 if not auth_header or auth_header != f'Bearer {WGREST_API_KEY}':
                     return jsonify({'error': 'Unauthorized'}), 401
                 
-                # Trigger sync
                 logger.info("Webhook triggered sync")
                 threading.Thread(target=self.sync_to_database).start()
                 
@@ -158,7 +164,6 @@ class WgrestSyncService:
         def health_check():
             return jsonify({'status': 'healthy', 'mode': SYNC_MODE}), 200
         
-        # Run webhook server in thread
         def run_webhook():
             try:
                 self.webhook_server = make_server('0.0.0.0', WEBHOOK_PORT, app, threaded=True)
@@ -234,6 +239,10 @@ class WgrestSyncService:
                     details['listen_port'] = int(value)
                 elif key == 'privatekey':
                     details['private_key'] = value
+                elif key == 'postup':
+                    details['post_up'] = value
+                elif key == 'postdown':
+                    details['post_down'] = value
                     
         if 'address' in details:
             if interface_name == 'wg0':
@@ -256,8 +265,51 @@ class WgrestSyncService:
                 logger.warning(f"Config file for {interface} not found")
         return configs
         
+    def sync_server_keys_to_database(self, configs):
+        """Sync server keys with encryption to server_keys table"""
+        try:
+            with self.conn.cursor() as cur:
+                for interface_name, config_content in configs.items():
+                    if config_content:
+                        config_details = self.parse_wireguard_config(config_content, interface_name)
+                        private_key = config_details.get('private_key')
+                        
+                        if private_key:
+                            # Generate public key from private key
+                            import subprocess
+                            try:
+                                public_key = subprocess.run(
+                                    ['wg', 'pubkey'], 
+                                    input=private_key.encode(), 
+                                    capture_output=True, 
+                                    text=True
+                                ).stdout.strip()
+                            except:
+                                public_key = ''
+                            
+                            # Encrypt private key for storage
+                            private_key_encrypted = self.encryption.encrypt(private_key)
+                            
+                            cur.execute("""
+                                INSERT INTO server_keys (interface_name, private_key, public_key) 
+                                VALUES (%(interface_name)s, %(private_key)s, %(public_key)s)
+                                ON CONFLICT (interface_name) DO UPDATE SET
+                                    private_key = EXCLUDED.private_key,
+                                    public_key = EXCLUDED.public_key,
+                                    generated_at = CURRENT_TIMESTAMP
+                            """, {
+                                'interface_name': interface_name,
+                                'private_key': private_key_encrypted,
+                                'public_key': public_key
+                            })
+                            
+                            logger.debug(f"Server key for {interface_name} encrypted and stored")
+                            
+        except Exception as e:
+            logger.error(f"Failed to sync server keys: {e}")
+        
     def sync_to_database(self):
-        logger.info("Starting sync with encryption...")
+        logger.info("Starting structured data sync with encryption...")
         
         interfaces, all_peers = self.get_wgrest_data()
         if interfaces is None:
@@ -266,20 +318,21 @@ class WgrestSyncService:
             
         configs = self.read_wireguard_configs()
         
+        # Sync server keys with encryption
+        self.sync_server_keys_to_database(configs)
+        
         try:
             with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 
-                # Sync interfaces with encryption
+                # Sync interfaces with structured data (NO config_content field)
                 for interface_name, interface_data in interfaces.items():
                     config_content = configs.get(interface_name, '')
                     config_details = self.parse_wireguard_config(config_content, interface_name)
                     
-                    private_key_encrypted = self.encryption.encrypt(config_details.get('private_key', ''))
-                    config_content_encrypted = self.encryption.encrypt(config_content) if config_content else None
-                    
+                    # Store only structured data, not entire config file
                     cur.execute("""
-                        INSERT INTO interfaces (name, private_key, public_key, address, listen_port, subnet, endpoint, config_content)
-                        VALUES (%(name)s, %(private_key)s, %(public_key)s, %(address)s, %(listen_port)s, %(subnet)s, %(endpoint)s, %(config_content)s)
+                        INSERT INTO interfaces (name, private_key, public_key, address, listen_port, subnet, endpoint)
+                        VALUES (%(name)s, %(private_key)s, %(public_key)s, %(address)s, %(listen_port)s, %(subnet)s, %(endpoint)s)
                         ON CONFLICT (name) DO UPDATE SET
                             private_key = EXCLUDED.private_key,
                             public_key = EXCLUDED.public_key,
@@ -287,19 +340,18 @@ class WgrestSyncService:
                             listen_port = EXCLUDED.listen_port,
                             subnet = EXCLUDED.subnet,
                             endpoint = EXCLUDED.endpoint,
-                            config_content = EXCLUDED.config_content,
                             last_updated = CURRENT_TIMESTAMP
                     """, {
                         'name': interface_name,
-                        'private_key': private_key_encrypted,
+                        'private_key': self.encryption.encrypt(config_details.get('private_key', '')),
                         'public_key': interface_data.get('public_key', ''),
                         'address': config_details.get('address', ''),
                         'listen_port': interface_data.get('listen_port', config_details.get('listen_port', 0)),
                         'subnet': config_details.get('subnet', ''),
-                        'endpoint': config_details.get('endpoint', ''),
-                        'config_content': config_content_encrypted
+                        'endpoint': config_details.get('endpoint', '')
                     })
                 
+                # Clear and sync peers with encryption
                 cur.execute("DELETE FROM peers")
                 
                 total_peers = 0
@@ -315,16 +367,17 @@ class WgrestSyncService:
                         """, {
                             'interface_name': interface_name,
                             'name': peer.get('url_safe_public_key', peer.get('public_key', ''))[:50],
-                            'private_key': '',
+                            'private_key': '',  # Client private keys not exposed by wgrest API
                             'public_key': peer.get('public_key', ''),
                             'allowed_ips': json.dumps(peer.get('allowed_ips', [])),
                             'endpoint': peer.get('endpoint'),
-                            'persistent_keepalive': None,
+                            'persistent_keepalive': peer.get('persistent_keepalive_interval', 0) if peer.get('persistent_keepalive_interval') else None,
                             'enabled': True,
                             'preshared_key': preshared_key_encrypted
                         })
                         total_peers += 1
                 
+                # Update sync status
                 wg0_count = len(all_peers.get('wg0', []))
                 wg1_count = len(all_peers.get('wg1', []))
                 
@@ -333,7 +386,7 @@ class WgrestSyncService:
                     VALUES (%(wg0)s, %(wg1)s)
                 """, {'wg0': wg0_count, 'wg1': wg1_count})
                 
-                logger.info(f"Sync completed: {total_peers} peers synced ({wg0_count} wg0, {wg1_count} wg1)")
+                logger.info(f"Structured sync completed: {total_peers} peers synced ({wg0_count} wg0, {wg1_count} wg1)")
                 
         except Exception as e:
             logger.error(f"Database sync failed: {e}")
@@ -344,12 +397,11 @@ def main():
     sync_service = WgrestSyncService()
     sync_service.connect_db()
     
-    # Initial sync on startup
-    logger.info("Performing initial sync...")
+    logger.info("Performing initial structured sync...")
     sync_service.sync_to_database()
     
     if SYNC_MODE == 'event-driven':
-        logger.info("Starting event-driven sync mode")
+        logger.info("Starting event-driven sync mode with structured data storage")
         sync_service.setup_file_monitoring()
         sync_service.setup_webhook_server()
         
@@ -369,7 +421,7 @@ def main():
             if sync_service.webhook_server:
                 sync_service.webhook_server.shutdown()
     else:
-        logger.info(f"Starting polling mode (interval: {POLLING_INTERVAL}s)")
+        logger.info(f"Starting polling mode with structured data storage (interval: {POLLING_INTERVAL}s)")
         schedule.every(POLLING_INTERVAL).seconds.do(sync_service.sync_to_database)
         
         if CLEANUP_ENABLED:

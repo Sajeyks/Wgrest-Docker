@@ -196,19 +196,34 @@ class WgrestSyncService:
     
     def generate_public_key_from_private(self, private_key):
         """Generate public key from private key using wg command"""
+        if not private_key or private_key.strip() == '':
+            logger.error("Cannot generate public key: private key is empty")
+            return ''
+            
         try:
+            # Ensure private key ends with newline for wg command
+            private_key_input = private_key.strip() + '\n'
+            
             result = subprocess.run(
                 ['wg', 'pubkey'], 
-                input=private_key.encode(), 
+                input=private_key_input.encode(), 
                 capture_output=True, 
                 text=True,
                 timeout=10
             )
             if result.returncode == 0:
-                return result.stdout.strip()
+                public_key = result.stdout.strip()
+                logger.debug(f"Generated public key: {public_key[:20]}...")
+                return public_key
             else:
-                logger.error(f"Failed to generate public key: {result.stderr}")
+                logger.error(f"wg pubkey failed with return code {result.returncode}: {result.stderr}")
                 return ''
+        except subprocess.TimeoutExpired:
+            logger.error("wg pubkey command timed out")
+            return ''
+        except FileNotFoundError:
+            logger.error("wg command not found - ensure wireguard-tools is installed")
+            return ''
         except Exception as e:
             logger.error(f"Error generating public key: {e}")
             return ''
@@ -302,6 +317,25 @@ class WgrestSyncService:
                             # Generate public key from private key
                             public_key = self.generate_public_key_from_private(private_key)
                             
+                            # Fallback: if wg command fails, try to get from wgrest API
+                            if not public_key:
+                                logger.warning(f"Failed to generate public key for {interface_name}, trying wgrest API...")
+                                try:
+                                    interfaces_resp = requests.get(f"{WGREST_API_URL}/v1/devices/", headers=self.headers)
+                                    if interfaces_resp.status_code == 200:
+                                        devices = interfaces_resp.json()
+                                        for device in devices:
+                                            if device['name'] == interface_name:
+                                                public_key = device.get('public_key', '')
+                                                logger.info(f"Retrieved public key for {interface_name} from wgrest API")
+                                                break
+                                except Exception as e:
+                                    logger.error(f"Failed to get public key from API: {e}")
+                            
+                            if not public_key:
+                                logger.error(f"Could not determine public key for {interface_name}")
+                                continue
+                            
                             # CRITICAL FIX: Use the existing encryption helper instead of storing plaintext
                             private_key_encrypted = self.encryption.encrypt(private_key)
                             
@@ -319,9 +353,11 @@ class WgrestSyncService:
                                     'public_key': public_key
                                 })
                                 
-                                logger.info(f"Server key for {interface_name} encrypted and stored successfully")
+                                logger.info(f"Server key for {interface_name} encrypted and stored successfully (public key: {public_key[:20]}...)")
                             else:
                                 logger.error(f"Failed to encrypt private key for {interface_name}")
+                        else:
+                            logger.warning(f"No private key found in config for {interface_name}")
                             
         except Exception as e:
             logger.error(f"Failed to sync server keys: {e}")
@@ -379,7 +415,42 @@ class WgrestSyncService:
                 total_peers = 0
                 for interface_name, peers in all_peers.items():
                     for peer in peers:
-                        preshared_key_encrypted = self.encryption.encrypt(peer.get('preshared_key', '')) if peer.get('preshared_key') else None
+                        # Handle preshared key encryption
+                        preshared_key_raw = peer.get('preshared_key', '')
+                        preshared_key_encrypted = None
+                        if preshared_key_raw and preshared_key_raw.strip():
+                            preshared_key_encrypted = self.encryption.encrypt(preshared_key_raw)
+                            if not preshared_key_encrypted:
+                                logger.warning(f"Failed to encrypt preshared key for peer {peer.get('public_key', 'unknown')[:20]}...")
+                        
+                        # Generate a proper name from public key or use provided name
+                        peer_name = peer.get('name', '')
+                        if not peer_name:
+                            # Use last 8 chars of public key as name if no name provided
+                            pub_key = peer.get('public_key', '')
+                            peer_name = f"peer_{pub_key[-8:]}" if pub_key else f"peer_{total_peers + 1}"
+                        
+                        # Handle allowed IPs - ensure it's always a valid JSON array
+                        allowed_ips = peer.get('allowed_ips', [])
+                        if not isinstance(allowed_ips, list):
+                            # Convert string to list if needed
+                            if isinstance(allowed_ips, str):
+                                allowed_ips = [ip.strip() for ip in allowed_ips.split(',') if ip.strip()]
+                            else:
+                                allowed_ips = []
+                        
+                        # Handle persistent keepalive
+                        keepalive = peer.get('persistent_keepalive_interval')
+                        if keepalive is not None:
+                            try:
+                                keepalive = int(keepalive) if keepalive > 0 else None
+                            except (ValueError, TypeError):
+                                keepalive = None
+                        
+                        # Get endpoint
+                        endpoint = peer.get('endpoint', '')
+                        if endpoint and not isinstance(endpoint, str):
+                            endpoint = str(endpoint)
                         
                         cur.execute("""
                             INSERT INTO peers (interface_name, name, private_key, public_key, allowed_ips, 
@@ -388,16 +459,22 @@ class WgrestSyncService:
                                    %(allowed_ips)s, %(endpoint)s, %(persistent_keepalive)s, %(enabled)s, %(preshared_key)s)
                         """, {
                             'interface_name': interface_name,
-                            'name': peer.get('url_safe_public_key', peer.get('public_key', ''))[:50],
+                            'name': peer_name[:100],  # Reasonable limit for name
                             'private_key': '',  # Client private keys not exposed by wgrest API
                             'public_key': peer.get('public_key', ''),
-                            'allowed_ips': json.dumps(peer.get('allowed_ips', [])),
-                            'endpoint': peer.get('endpoint'),
-                            'persistent_keepalive': peer.get('persistent_keepalive_interval', 0) if peer.get('persistent_keepalive_interval') else None,
-                            'enabled': True,
+                            'allowed_ips': json.dumps(allowed_ips),
+                            'endpoint': endpoint if endpoint else None,
+                            'persistent_keepalive': keepalive,
+                            'enabled': peer.get('enabled', True),
                             'preshared_key': preshared_key_encrypted
                         })
                         total_peers += 1
+                        
+                        # Log peer sync details
+                        logger.debug(f"Synced peer {peer_name} on {interface_name}: "
+                                   f"IPs={len(allowed_ips)}, PSK={'yes' if preshared_key_encrypted else 'no'}, "
+                                   f"Endpoint={'yes' if endpoint else 'no'}")
+                        
                 
                 # Update sync status - FIXED: Always create sync status record
                 wg0_count = len(all_peers.get('wg0', []))
@@ -417,7 +494,27 @@ class WgrestSyncService:
                 cur.execute("SELECT COUNT(*) FROM interfaces WHERE private_key IS NOT NULL AND private_key != ''")
                 encrypted_interfaces_count = cur.fetchone()[0]
                 
-                logger.info(f"Encryption verification: {encrypted_keys_count} server keys encrypted, {encrypted_interfaces_count} interface keys encrypted")
+                # Verify peer encryption (count peers with encrypted PSKs)
+                cur.execute("SELECT COUNT(*) FROM peers WHERE preshared_key IS NOT NULL AND preshared_key != ''")
+                encrypted_psk_count = cur.fetchone()[0]
+                
+                logger.info(f"Encryption verification: {encrypted_keys_count} server keys encrypted, "
+                          f"{encrypted_interfaces_count} interface keys encrypted, "
+                          f"{encrypted_psk_count} peer PSKs encrypted")
+                
+                # Log peer details for debugging
+                if total_peers > 0:
+                    cur.execute("""
+                        SELECT interface_name, COUNT(*) as peer_count, 
+                               COUNT(CASE WHEN preshared_key IS NOT NULL THEN 1 END) as psk_count,
+                               COUNT(CASE WHEN endpoint IS NOT NULL THEN 1 END) as endpoint_count
+                        FROM peers 
+                        GROUP BY interface_name
+                    """)
+                    peer_stats = cur.fetchall()
+                    for interface_name, peer_count, psk_count, endpoint_count in peer_stats:
+                        logger.info(f"Interface {interface_name}: {peer_count} peers, "
+                                  f"{psk_count} with PSK, {endpoint_count} with endpoints")
                 
         except Exception as e:
             logger.error(f"Database sync failed: {e}")

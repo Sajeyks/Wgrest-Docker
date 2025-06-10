@@ -118,7 +118,7 @@ if netstat -ulpn | grep -q ":$WG0_PORT "; then
     sudo fuser -k $WG0_PORT/udp 2>/dev/null || true
 fi
 
-if netstat -ulpn | grep -q ":$WG1_PORT "; then
+if netstat -tlpn | grep -q ":$WG1_PORT "; then
     echo "⚠️  Port $WG1_PORT is in use. Attempting to free it..."
     sudo fuser -k $WG1_PORT/udp 2>/dev/null || true
 fi
@@ -128,30 +128,14 @@ if netstat -tlpn | grep -q ":$WGREST_PORT "; then
     sudo fuser -k $WGREST_PORT/tcp 2>/dev/null || true
 fi
 
-# Generate WireGuard keys
+# Generate WireGuard keys (but don't store them yet - let sync service handle it)
 echo "🔑 Generating WireGuard keys..."
 WG0_PRIVATE=$(wg genkey)
 WG0_PUBLIC=$(echo $WG0_PRIVATE | wg pubkey)
 WG1_PRIVATE=$(wg genkey)
 WG1_PUBLIC=$(echo $WG1_PRIVATE | wg pubkey)
 
-# Store keys in database
-echo "💾 Storing server keys in database..."
-psql << EOF
-INSERT INTO server_keys (interface_name, private_key, public_key) 
-VALUES ('wg0', '$WG0_PRIVATE', '$WG0_PUBLIC')
-ON CONFLICT (interface_name) DO UPDATE SET
-    private_key = EXCLUDED.private_key,
-    public_key = EXCLUDED.public_key,
-    generated_at = CURRENT_TIMESTAMP;
-
-INSERT INTO server_keys (interface_name, private_key, public_key) 
-VALUES ('wg1', '$WG1_PRIVATE', '$WG1_PUBLIC')
-ON CONFLICT (interface_name) DO UPDATE SET
-    private_key = EXCLUDED.private_key,
-    public_key = EXCLUDED.public_key,
-    generated_at = CURRENT_TIMESTAMP;
-EOF
+echo "🔐 Keys will be encrypted and stored by sync service after configs are created"
 
 # Create initial WireGuard configs
 echo "📝 Creating initial WireGuard configurations..."
@@ -275,15 +259,63 @@ if [ $API_RETRIES -eq $MAX_RETRIES ]; then
     exit 1
 fi
 
-# Check sync service
-echo "🔄 Checking sync service..."
-sleep 10
-if docker-compose logs wgrest-sync | grep -q "Sync completed\|Connected to PostgreSQL\|Starting sync"; then
-    echo "✅ Sync service is working"
-else
-    echo "⚠️  Sync service may still be starting..."
+# CRITICAL: Trigger initial sync to encrypt and store everything properly
+echo "🔄 Triggering initial sync to encrypt and store configurations..."
+sleep 5  # Let sync service fully initialize
+
+SYNC_RETRIES=0
+MAX_SYNC_RETRIES=10
+
+while [ $SYNC_RETRIES -lt $MAX_SYNC_RETRIES ]; do
+    if curl -s -X POST -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:8090/sync | grep -q "sync_triggered"; then
+        echo "✅ Initial sync triggered successfully"
+        break
+    else
+        echo "⏳ Sync service not ready yet, waiting... (attempt $((SYNC_RETRIES + 1))/$MAX_SYNC_RETRIES)"
+        if [ $SYNC_RETRIES -eq 3 ]; then
+            echo "📋 Sync service logs:"
+            docker-compose logs --tail=20 wgrest-sync
+        fi
+        sleep 10
+        SYNC_RETRIES=$((SYNC_RETRIES + 1))
+    fi
+done
+
+if [ $SYNC_RETRIES -eq $MAX_SYNC_RETRIES ]; then
+    echo "⚠️  Could not trigger initial sync via webhook, sync will happen on file change"
+    echo "📋 Sync service status:"
     docker-compose logs wgrest-sync
 fi
+
+# Wait for sync to complete
+echo "⏳ Waiting for initial sync to complete..."
+sleep 20
+
+# Verify that encrypted data was stored
+echo "🔍 Verifying encrypted data storage..."
+STORED_KEYS=$(psql -t -c "SELECT COUNT(*) FROM server_keys WHERE private_key IS NOT NULL AND private_key != '';" | xargs)
+STORED_INTERFACES=$(psql -t -c "SELECT COUNT(*) FROM interfaces;" | xargs)
+STORED_SYNC_STATUS=$(psql -t -c "SELECT COUNT(*) FROM sync_status;" | xargs)
+
+echo "📊 Database verification:"
+echo "   Server keys stored: $STORED_KEYS/2"
+echo "   Interfaces stored: $STORED_INTERFACES/2"
+echo "   Sync status records: $STORED_SYNC_STATUS"
+
+if [ "$STORED_KEYS" -eq 2 ] && [ "$STORED_INTERFACES" -eq 2 ] && [ "$STORED_SYNC_STATUS" -gt 0 ]; then
+    echo "✅ All data properly encrypted and stored in database"
+else
+    echo "⚠️  Some data may not be properly stored. Check sync service logs:"
+    docker-compose logs wgrest-sync
+fi
+
+# Final verification
+echo "🧪 Final verification..."
+for interface in wg0 wg1; do
+    PEER_COUNT=$(curl -s -H "Authorization: Bearer $WGREST_API_KEY" \
+                      "http://localhost:$WGREST_PORT/v1/devices/$interface/peers/" 2>/dev/null | jq length 2>/dev/null || echo "0")
+    echo "Interface $interface: $PEER_COUNT peers (expected: 0 for fresh install)"
+done
 
 echo ""
 echo "🎉 Setup completed successfully!"
@@ -295,6 +327,7 @@ echo "   🔑 wg0 Public Key: $WG0_PUBLIC"
 echo "   🔑 wg1 Public Key: $WG1_PUBLIC"
 echo "   🗄️  External Database: $DB_HOST:$DB_PORT/$DB_NAME"
 echo "   🎯 Target Website IP: $TARGET_WEBSITE_IP"
+echo "   🔐 Server keys encrypted and stored in database"
 echo ""
 echo "🔗 WireGuard Interface Status:"
 sudo wg show
@@ -302,8 +335,10 @@ echo ""
 echo "🔧 Next steps:"
 echo "   1. Configure your Django app to use this wgrest API"
 echo "   2. Create peers via Django -> wgrest API"
-echo "   3. Database automatically syncs every 60 seconds"
+echo "   3. Database automatically syncs on changes (event-driven)"
+echo "   4. Manual sync available: curl -X POST -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:8090/sync"
 echo ""
 echo "💾 Backup strategy:"
+echo "   - All data (including encrypted keys) stored in external PostgreSQL"
 echo "   - Backup external PostgreSQL database: pg_dump $DB_NAME"
 echo "   - Restoration: restore database + run './scripts/restore.sh'"

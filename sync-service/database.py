@@ -181,28 +181,30 @@ class SyncDatabase:
         self.ensure_connection()
         
         try:
-            if self.conn:
-                with self.conn.cursor() as cur:
-                    # Count encrypted server keys
-                    cur.execute("SELECT COUNT(*) FROM server_keys WHERE private_key IS NOT NULL AND private_key != ''")
-                    result = cur.fetchone()
-                    encrypted_server_keys = result[0] if result else 0
-                    
-                    # Count encrypted interface keys
-                    cur.execute("SELECT COUNT(*) FROM interfaces WHERE private_key IS NOT NULL AND private_key != ''")
-                    result = cur.fetchone()
-                    encrypted_interface_keys = result[0] if result else 0
-                    
-                    # Count encrypted PSKs
-                    cur.execute("SELECT COUNT(*) FROM peers WHERE preshared_key IS NOT NULL AND preshared_key != ''")
-                    result = cur.fetchone()
-                    encrypted_psks = result[0] if result else 0
-                    
-                    return {
-                        'encrypted_server_keys': encrypted_server_keys,
-                        'encrypted_interface_keys': encrypted_interface_keys,
-                        'encrypted_psks': encrypted_psks
-                    }
+            if not self.conn:
+                return {}
+                
+            with self.conn.cursor() as cur:
+                # Count encrypted server keys
+                cur.execute("SELECT COUNT(*) FROM server_keys WHERE private_key IS NOT NULL AND private_key != ''")
+                result = cur.fetchone()
+                encrypted_server_keys = result[0] if result else 0
+                
+                # Count encrypted interface keys
+                cur.execute("SELECT COUNT(*) FROM interfaces WHERE private_key IS NOT NULL AND private_key != ''")
+                result = cur.fetchone()
+                encrypted_interface_keys = result[0] if result else 0
+                
+                # Count encrypted PSKs
+                cur.execute("SELECT COUNT(*) FROM peers WHERE preshared_key IS NOT NULL AND preshared_key != ''")
+                result = cur.fetchone()
+                encrypted_psks = result[0] if result else 0
+                
+                return {
+                    'encrypted_server_keys': encrypted_server_keys,
+                    'encrypted_interface_keys': encrypted_interface_keys,
+                    'encrypted_psks': encrypted_psks
+                }
         except Exception as e:
             logger.error(f"Failed to get encryption stats: {e}")
             return {}
@@ -217,17 +219,19 @@ class SyncDatabase:
         self.ensure_connection()
         
         try:
-            if self.conn:
-                with self.conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT interface_name, COUNT(*) as peer_count, 
-                               COUNT(CASE WHEN preshared_key IS NOT NULL THEN 1 END) as psk_count,
-                               COUNT(CASE WHEN endpoint IS NOT NULL THEN 1 END) as endpoint_count
-                        FROM peers 
-                        GROUP BY interface_name
-                    """)
-                    
-                    return cur.fetchall()
+            if not self.conn:
+                return []
+                
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT interface_name, COUNT(*) as peer_count, 
+                           COUNT(CASE WHEN preshared_key IS NOT NULL THEN 1 END) as psk_count,
+                           COUNT(CASE WHEN endpoint IS NOT NULL THEN 1 END) as endpoint_count
+                    FROM peers 
+                    GROUP BY interface_name
+                """)
+                
+                return cur.fetchall()
         except Exception as e:
             logger.error(f"Failed to get peer stats: {e}")
             return []

@@ -6,7 +6,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy sync script
-COPY sync.py .
+# Copy all modular components
+COPY config.py .
+COPY encryption.py .
+COPY wgrest_api.py .
+COPY config_parser.py .
+COPY database.py .
+COPY webhook.py .
+COPY file_watcher.py .
+COPY data_processor.py .
+COPY sync_modular.py .
 
-CMD ["python", "sync.py"]
+# Use the modular sync service as entry point
+CMD ["python", "sync_modular.py"]

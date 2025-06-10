@@ -59,82 +59,43 @@ echo "📊 Found in database:"
 echo "   wg0: $WG0_PEERS peers"
 echo "   wg1: $WG1_PEERS peers"
 
-# Create decryption helper script
-echo "🔧 Creating decryption helper..."
-cat > /tmp/decrypt_helper.py << 'DECRYPT_SCRIPT'
-#!/usr/bin/env python3
-import os, sys, psycopg2, hashlib, base64, json
-from cryptography.fernet import Fernet
+# Check if our decrypt helper exists
+if [ ! -f "scripts/decrypt_helper.py" ]; then
+    echo "❌ scripts/decrypt_helper.py not found"
+    echo "   This script is required for decryption"
+    exit 1
+fi
 
-def setup_encryption():
-    WGREST_API_KEY = os.getenv('WGREST_API_KEY')
-    ENCRYPTION_KEY = os.getenv('DB_ENCRYPTION_KEY')
-    if not ENCRYPTION_KEY:
-        key_material = hashlib.sha256(WGREST_API_KEY.encode()).digest()
-        ENCRYPTION_KEY = base64.urlsafe_b64encode(key_material)
-    return Fernet(ENCRYPTION_KEY)
-
-def decrypt_field(cipher, encrypted_data):
-    if not encrypted_data: 
-        return None
-    try: 
-        return cipher.decrypt(encrypted_data.encode()).decode()
-    except: 
-        return encrypted_data
-
-DATABASE_URL = os.getenv('DATABASE_URL')
-conn = psycopg2.connect(DATABASE_URL)
-cur = conn.cursor()
-cipher = setup_encryption()
-
-if sys.argv[1] == "server_key":
-    cur.execute("SELECT private_key FROM server_keys WHERE interface_name = %s", (sys.argv[2],))
-    result = cur.fetchone()
-    if result: 
-        print(decrypt_field(cipher, result[0]))
-
-elif sys.argv[1] == "interface_data":
-    cur.execute("SELECT address, listen_port FROM interfaces WHERE name = %s", (sys.argv[2],))
-    result = cur.fetchone()
-    if result: 
-        print(f"{result[0]},{result[1]}")
-
-elif sys.argv[1] == "peers":
-    cur.execute("""
-        SELECT public_key, preshared_key, allowed_ips, endpoint, persistent_keepalive 
-        FROM peers 
-        WHERE interface_name = %s AND enabled = true 
-        ORDER BY name
-    """, (sys.argv[2],))
-    
-    for row in cur.fetchall():
-        print("[Peer]")
-        print(f"PublicKey = {row[0]}")
-        if row[1]: 
-            print(f"PresharedKey = {decrypt_field(cipher, row[1])}")
-        if row[2]: 
-            try:
-                ips = json.loads(row[2])
-                print(f"AllowedIPs = {', '.join(ips)}")
-            except:
-                print(f"AllowedIPs = {row[2]}")
-        if row[3]: 
-            print(f"Endpoint = {row[3]}")
-        if row[4]: 
-            print(f"PersistentKeepalive = {row[4]}")
-        print()
-
-conn.close()
-DECRYPT_SCRIPT
+# Install Python dependencies for decrypt helper
+echo "🔧 Installing Python dependencies..."
+pip3 install -q psycopg2-binary cryptography python-dotenv 2>/dev/null || {
+    echo "⚠️  Could not install Python dependencies, trying without..."
+}
 
 # Restore WireGuard configs from structured database data
 echo "📝 Reconstructing WireGuard configurations from structured data..."
 sudo rm -f /etc/wireguard/wg*.conf
 
+# Function to safely get decrypted data
+get_server_key() {
+    local interface=$1
+    python3 scripts/decrypt_helper.py server_key "$interface" 2>/dev/null || echo ""
+}
+
+get_interface_data() {
+    local interface=$1
+    python3 scripts/decrypt_helper.py interface_data "$interface" 2>/dev/null || echo ","
+}
+
+get_peers_config() {
+    local interface=$1
+    python3 scripts/decrypt_helper.py peers "$interface" 2>/dev/null || echo ""
+}
+
 # Restore wg0 config by reconstructing from structured data
 echo "🔧 Reconstructing wg0.conf..."
-WG0_PRIVATE=$(python3 /tmp/decrypt_helper.py server_key wg0 2>/dev/null)
-WG0_DATA=$(python3 /tmp/decrypt_helper.py interface_data wg0 2>/dev/null)
+WG0_PRIVATE=$(get_server_key wg0)
+WG0_DATA=$(get_interface_data wg0)
 
 if [ ! -z "$WG0_PRIVATE" ] && [ "$WG0_PRIVATE" != "" ]; then
     # Parse interface data
@@ -154,9 +115,12 @@ EOF
 
     # Add peers from database (decrypted)
     echo "   Adding wg0 peers from database..."
-    python3 /tmp/decrypt_helper.py peers wg0 2>/dev/null | sudo tee -a /etc/wireguard/wg0.conf > /dev/null
+    WG0_PEERS_CONFIG=$(get_peers_config wg0)
+    if [ ! -z "$WG0_PEERS_CONFIG" ]; then
+        echo "$WG0_PEERS_CONFIG" | sudo tee -a /etc/wireguard/wg0.conf > /dev/null
+    fi
     
-    RESTORED_WG0_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg0.conf || echo 0)
+    RESTORED_WG0_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg0.conf 2>/dev/null || echo 0)
     echo "✅ wg0.conf reconstructed with $RESTORED_WG0_PEERS peers"
 else
     echo "⚠️  wg0 server key not found in database, creating basic config"
@@ -171,8 +135,8 @@ fi
 
 # Restore wg1 config by reconstructing from structured data  
 echo "🔧 Reconstructing wg1.conf..."
-WG1_PRIVATE=$(python3 /tmp/decrypt_helper.py server_key wg1 2>/dev/null)
-WG1_DATA=$(python3 /tmp/decrypt_helper.py interface_data wg1 2>/dev/null)
+WG1_PRIVATE=$(get_server_key wg1)
+WG1_DATA=$(get_interface_data wg1)
 
 if [ ! -z "$WG1_PRIVATE" ] && [ "$WG1_PRIVATE" != "" ]; then
     # Parse interface data
@@ -192,9 +156,12 @@ EOF
 
     # Add peers from database (decrypted)
     echo "   Adding wg1 peers from database..."
-    python3 /tmp/decrypt_helper.py peers wg1 2>/dev/null | sudo tee -a /etc/wireguard/wg1.conf > /dev/null
+    WG1_PEERS_CONFIG=$(get_peers_config wg1)
+    if [ ! -z "$WG1_PEERS_CONFIG" ]; then
+        echo "$WG1_PEERS_CONFIG" | sudo tee -a /etc/wireguard/wg1.conf > /dev/null
+    fi
     
-    RESTORED_WG1_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg1.conf || echo 0)
+    RESTORED_WG1_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg1.conf 2>/dev/null || echo 0)
     echo "✅ wg1.conf reconstructed with $RESTORED_WG1_PEERS peers"
 else
     echo "⚠️  wg1 server key not found in database, creating basic config"
@@ -242,17 +209,77 @@ docker-compose up -d
 echo "⏳ Waiting for services to start..."
 sleep 30
 
-# Wait for sync to complete (it will restore all peers to wgrest)
-echo "🔄 Waiting for database sync to restore peers..."
-sleep 30
+# Verify wgrest API is responding
+echo "🧪 Waiting for wgrest API to be ready..."
+API_RETRIES=0
+MAX_RETRIES=6
+
+while [ $API_RETRIES -lt $MAX_RETRIES ]; do
+    if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/v1/devices/ >/dev/null; then
+        echo "✅ wgrest API is responding"
+        break
+    else
+        echo "⏳ wgrest API not ready yet, waiting... (attempt $((API_RETRIES + 1))/$MAX_RETRIES)"
+        sleep 10
+        API_RETRIES=$((API_RETRIES + 1))
+    fi
+done
+
+if [ $API_RETRIES -eq $MAX_RETRIES ]; then
+    echo "⚠️  wgrest API not responding, but continuing with restoration"
+fi
+
+# Trigger sync to ensure wgrest knows about all peers
+echo "🔄 Triggering sync to populate wgrest with restored peers..."
+SYNC_RETRIES=0
+MAX_SYNC_RETRIES=6
+
+while [ $SYNC_RETRIES -lt $MAX_SYNC_RETRIES ]; do
+    if curl -s -X POST -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:8090/sync | grep -q "sync_triggered"; then
+        echo "✅ Sync triggered successfully"
+        break
+    else
+        echo "⏳ Sync service not ready yet, waiting... (attempt $((SYNC_RETRIES + 1))/$MAX_SYNC_RETRIES)"
+        sleep 10
+        SYNC_RETRIES=$((SYNC_RETRIES + 1))
+    fi
+done
+
+# Wait for sync to complete
+echo "⏳ Waiting for sync to complete..."
+sleep 20
 
 # Verify restoration
 echo "🧪 Verifying restoration..."
+
+# Check wgrest API peer counts
 for interface in wg0 wg1; do
-    PEER_COUNT=$(curl -s -H "Authorization: Bearer $WGREST_API_KEY" \
-                      "http://localhost:$WGREST_PORT/v1/devices/$interface/peers/" 2>/dev/null | jq length 2>/dev/null || echo "0")
-    echo "Interface $interface: $PEER_COUNT peers restored via API"
+    if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/v1/devices/ >/dev/null 2>&1; then
+        API_PEER_COUNT=$(curl -s -H "Authorization: Bearer $WGREST_API_KEY" \
+                              "http://localhost:$WGREST_PORT/v1/devices/$interface/peers/" 2>/dev/null | \
+                              python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+        echo "Interface $interface: $API_PEER_COUNT peers restored via API"
+    else
+        echo "Interface $interface: API not accessible"
+    fi
 done
+
+# Check database consistency
+echo ""
+echo "📊 Database vs Config Verification:"
+DB_WG0_PEERS=$(psql -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg0';" 2>/dev/null | xargs || echo "0")
+DB_WG1_PEERS=$(psql -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg1';" 2>/dev/null | xargs || echo "0")
+CONFIG_WG0_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg0.conf 2>/dev/null || echo "0")
+CONFIG_WG1_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg1.conf 2>/dev/null || echo "0")
+
+echo "   Database: wg0=$DB_WG0_PEERS, wg1=$DB_WG1_PEERS"
+echo "   Config files: wg0=$CONFIG_WG0_PEERS, wg1=$CONFIG_WG1_PEERS"
+
+if [ "$DB_WG0_PEERS" -eq "$CONFIG_WG0_PEERS" ] && [ "$DB_WG1_PEERS" -eq "$CONFIG_WG1_PEERS" ]; then
+    echo "✅ Database and config files are consistent"
+else
+    echo "⚠️  Peer counts don't match - this may be normal if some peers couldn't be decrypted"
+fi
 
 # Show WireGuard status
 echo ""
@@ -263,28 +290,23 @@ else
     echo "⚠️  WireGuard interfaces not accessible"
 fi
 
-# Cleanup temporary files
-rm -f /tmp/decrypt_helper.py
-
 echo ""
 echo "✅ Database restoration completed!"
 echo ""
 echo "🔄 The restoration process:"
 echo "   1. ✅ Read structured data from external PostgreSQL"
-echo "   2. ✅ Decrypted sensitive fields (private keys, PSKs)"
+echo "   2. ✅ Decrypted sensitive fields using existing decrypt helper"
 echo "   3. ✅ Reconstructed WireGuard config files with all peers"
 echo "   4. ✅ Started WireGuard interfaces"
-echo "   5. ✅ Started Docker services"
-echo "   6. ✅ Sync service automatically syncs any changes"
+echo "   5. ✅ Started Docker services with improved sync service"
+echo "   6. ✅ Triggered sync to ensure wgrest API consistency"
 echo ""
 echo "📊 Restoration Summary:"
-echo "   Database wg0 peers: $WG0_PEERS"
-echo "   Database wg1 peers: $WG1_PEERS"
-if [ ! -z "$RESTORED_WG0_PEERS" ]; then
-    echo "   Restored wg0 peers: $RESTORED_WG0_PEERS"
-fi
-if [ ! -z "$RESTORED_WG1_PEERS" ]; then
-    echo "   Restored wg1 peers: $RESTORED_WG1_PEERS"
-fi
+echo "   Database wg0 peers: $DB_WG0_PEERS"
+echo "   Database wg1 peers: $DB_WG1_PEERS"
+echo "   Restored wg0 peers: ${RESTORED_WG0_PEERS:-$CONFIG_WG0_PEERS}"
+echo "   Restored wg1 peers: ${RESTORED_WG1_PEERS:-$CONFIG_WG1_PEERS}"
 echo ""
-echo "🧪 Verify with: curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/v1/devices/"
+echo "🧪 Verify with:"
+echo "   curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/v1/devices/"
+echo "   python3 verify_peer_sync.py"

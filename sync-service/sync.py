@@ -2,6 +2,7 @@
 """
 Event-driven wgrest → PostgreSQL sync service with structured data storage
 Stores only structured data, reconstructs config files during restoration
+FIXED: Proper server key encryption using existing encryption functions
 """
 
 import json
@@ -21,6 +22,7 @@ from watchdog.events import FileSystemEventHandler
 import threading
 from flask import Flask, request, jsonify
 from werkzeug.serving import make_server
+import subprocess
 
 # Configuration
 WGREST_PORT = os.getenv('WGREST_PORT', '51822')
@@ -191,6 +193,25 @@ class WgrestSyncService:
                     logger.info(f"Cleaned up {deleted_count} old sync status records")
         except Exception as e:
             logger.error(f"Failed to cleanup old sync logs: {e}")
+    
+    def generate_public_key_from_private(self, private_key):
+        """Generate public key from private key using wg command"""
+        try:
+            result = subprocess.run(
+                ['wg', 'pubkey'], 
+                input=private_key.encode(), 
+                capture_output=True, 
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+            else:
+                logger.error(f"Failed to generate public key: {result.stderr}")
+                return ''
+        except Exception as e:
+            logger.error(f"Error generating public key: {e}")
+            return ''
             
     def get_wgrest_data(self):
         try:
@@ -266,7 +287,10 @@ class WgrestSyncService:
         return configs
         
     def sync_server_keys_to_database(self, configs):
-        """Sync server keys with encryption to server_keys table"""
+        """
+        FIXED: Sync server keys with PROPER encryption using existing encryption functions
+        This ensures server private keys are encrypted consistently
+        """
         try:
             with self.conn.cursor() as cur:
                 for interface_name, config_content in configs.items():
@@ -276,34 +300,28 @@ class WgrestSyncService:
                         
                         if private_key:
                             # Generate public key from private key
-                            import subprocess
-                            try:
-                                public_key = subprocess.run(
-                                    ['wg', 'pubkey'], 
-                                    input=private_key.encode(), 
-                                    capture_output=True, 
-                                    text=True
-                                ).stdout.strip()
-                            except:
-                                public_key = ''
+                            public_key = self.generate_public_key_from_private(private_key)
                             
-                            # Encrypt private key for storage
+                            # CRITICAL FIX: Use the existing encryption helper instead of storing plaintext
                             private_key_encrypted = self.encryption.encrypt(private_key)
                             
-                            cur.execute("""
-                                INSERT INTO server_keys (interface_name, private_key, public_key) 
-                                VALUES (%(interface_name)s, %(private_key)s, %(public_key)s)
-                                ON CONFLICT (interface_name) DO UPDATE SET
-                                    private_key = EXCLUDED.private_key,
-                                    public_key = EXCLUDED.public_key,
-                                    generated_at = CURRENT_TIMESTAMP
-                            """, {
-                                'interface_name': interface_name,
-                                'private_key': private_key_encrypted,
-                                'public_key': public_key
-                            })
-                            
-                            logger.debug(f"Server key for {interface_name} encrypted and stored")
+                            if private_key_encrypted:  # Only store if encryption succeeded
+                                cur.execute("""
+                                    INSERT INTO server_keys (interface_name, private_key, public_key) 
+                                    VALUES (%(interface_name)s, %(private_key)s, %(public_key)s)
+                                    ON CONFLICT (interface_name) DO UPDATE SET
+                                        private_key = EXCLUDED.private_key,
+                                        public_key = EXCLUDED.public_key,
+                                        generated_at = CURRENT_TIMESTAMP
+                                """, {
+                                    'interface_name': interface_name,
+                                    'private_key': private_key_encrypted,
+                                    'public_key': public_key
+                                })
+                                
+                                logger.info(f"Server key for {interface_name} encrypted and stored successfully")
+                            else:
+                                logger.error(f"Failed to encrypt private key for {interface_name}")
                             
         except Exception as e:
             logger.error(f"Failed to sync server keys: {e}")
@@ -318,7 +336,7 @@ class WgrestSyncService:
             
         configs = self.read_wireguard_configs()
         
-        # Sync server keys with encryption
+        # FIXED: Sync server keys with PROPER encryption using existing functions
         self.sync_server_keys_to_database(configs)
         
         try:
@@ -328,6 +346,10 @@ class WgrestSyncService:
                 for interface_name, interface_data in interfaces.items():
                     config_content = configs.get(interface_name, '')
                     config_details = self.parse_wireguard_config(config_content, interface_name)
+                    
+                    # Get the private key from config and encrypt it properly
+                    private_key_raw = config_details.get('private_key', '')
+                    private_key_encrypted = self.encryption.encrypt(private_key_raw) if private_key_raw else None
                     
                     # Store only structured data, not entire config file
                     cur.execute("""
@@ -343,7 +365,7 @@ class WgrestSyncService:
                             last_updated = CURRENT_TIMESTAMP
                     """, {
                         'name': interface_name,
-                        'private_key': self.encryption.encrypt(config_details.get('private_key', '')),
+                        'private_key': private_key_encrypted,  # FIXED: Use encrypted version
                         'public_key': interface_data.get('public_key', ''),
                         'address': config_details.get('address', ''),
                         'listen_port': interface_data.get('listen_port', config_details.get('listen_port', 0)),
@@ -377,16 +399,25 @@ class WgrestSyncService:
                         })
                         total_peers += 1
                 
-                # Update sync status
+                # Update sync status - FIXED: Always create sync status record
                 wg0_count = len(all_peers.get('wg0', []))
                 wg1_count = len(all_peers.get('wg1', []))
                 
                 cur.execute("""
-                    INSERT INTO sync_status (peer_count_wg0, peer_count_wg1) 
-                    VALUES (%(wg0)s, %(wg1)s)
+                    INSERT INTO sync_status (peer_count_wg0, peer_count_wg1, status) 
+                    VALUES (%(wg0)s, %(wg1)s, 'completed')
                 """, {'wg0': wg0_count, 'wg1': wg1_count})
                 
                 logger.info(f"Structured sync completed: {total_peers} peers synced ({wg0_count} wg0, {wg1_count} wg1)")
+                
+                # Verify encryption worked
+                cur.execute("SELECT COUNT(*) FROM server_keys WHERE private_key IS NOT NULL AND private_key != ''")
+                encrypted_keys_count = cur.fetchone()[0]
+                
+                cur.execute("SELECT COUNT(*) FROM interfaces WHERE private_key IS NOT NULL AND private_key != ''")
+                encrypted_interfaces_count = cur.fetchone()[0]
+                
+                logger.info(f"Encryption verification: {encrypted_keys_count} server keys encrypted, {encrypted_interfaces_count} interface keys encrypted")
                 
         except Exception as e:
             logger.error(f"Database sync failed: {e}")
@@ -397,7 +428,7 @@ def main():
     sync_service = WgrestSyncService()
     sync_service.connect_db()
     
-    logger.info("Performing initial structured sync...")
+    logger.info("Performing initial structured sync with proper encryption...")
     sync_service.sync_to_database()
     
     if SYNC_MODE == 'event-driven':

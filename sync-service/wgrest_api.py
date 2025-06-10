@@ -6,7 +6,7 @@ Handles all interactions with the wgrest API
 
 import requests
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class WgrestApiClient:
             return peers
             
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
+            if e.response and e.response.status_code == 404:
                 logger.warning(f"Interface {interface_name} not found, returning empty peer list")
                 return []
             else:
@@ -91,7 +91,7 @@ class WgrestApiClient:
             logger.error(f"Unexpected error fetching peers for {interface_name}: {e}")
             return None
     
-    def get_all_peers(self, interface_names: List[str] = None) -> Optional[Dict[str, List[dict]]]:
+    def get_all_peers(self, interface_names: Optional[List[str]] = None) -> Optional[Dict[str, List[dict]]]:
         """
         Get peers for all specified interfaces
         

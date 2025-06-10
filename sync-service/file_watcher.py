@@ -7,7 +7,7 @@ Triggers sync when config files are modified
 import logging
 import threading
 import time
-from typing import Callable
+from typing import Callable, Optional
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -24,10 +24,11 @@ class WireGuardFileHandler(FileSystemEventHandler):
             sync_callback: Function to call when sync is needed
             debounce_seconds: Seconds to wait before triggering sync
         """
+        super().__init__()
         self.sync_callback = sync_callback
         self.debounce_seconds = debounce_seconds
         self.last_sync = 0
-        self.debounce_timer: threading.Timer = None
+        self.debounce_timer: Optional[threading.Timer] = None
         
     def on_modified(self, event):
         """Handle file modification events"""
@@ -81,8 +82,8 @@ class FileWatcher:
         self.watch_dir = watch_dir
         self.sync_callback = sync_callback
         self.debounce_seconds = debounce_seconds
-        self.observer: Observer = None
-        self.event_handler: WireGuardFileHandler = None
+        self.observer: Optional[Observer] = None
+        self.event_handler: Optional[WireGuardFileHandler] = None
     
     def start(self):
         """Start watching for file changes"""
@@ -93,14 +94,15 @@ class FileWatcher:
                 debounce_seconds=self.debounce_seconds
             )
             
-            self.observer.schedule(
-                self.event_handler, 
-                self.watch_dir, 
-                recursive=False
-            )
-            
-            self.observer.start()
-            logger.info(f"File monitoring started for {self.watch_dir}")
+            if self.observer and self.event_handler:
+                self.observer.schedule(
+                    self.event_handler, 
+                    self.watch_dir, 
+                    recursive=False
+                )
+                
+                self.observer.start()
+                logger.info(f"File monitoring started for {self.watch_dir}")
             
         except Exception as e:
             logger.error(f"Failed to start file monitoring: {e}")
@@ -118,6 +120,7 @@ class FileWatcher:
         
         if self.event_handler and self.event_handler.debounce_timer:
             self.event_handler.debounce_timer.cancel()
+            self.event_handler.debounce_timer = None
     
     def is_running(self) -> bool:
         """Check if file watcher is running"""

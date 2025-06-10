@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class WebhookServer:
     """HTTP webhook server for sync triggers"""
     
-    def __init__(self, port: int, api_key: str, sync_callback: Callable):
+    def __init__(self, port: int, api_key: str, sync_callback: Callable[[], None]):
         """
         Initialize webhook server
         
@@ -91,13 +91,14 @@ class WebhookServer:
             try:
                 self.server = make_server('0.0.0.0', self.port, self.app, threaded=True)
                 logger.info(f"Webhook server started on port {self.port}")
-                self.server.serve_forever()
+                if self.server:
+                    self.server.serve_forever()
             except Exception as e:
                 logger.error(f"Webhook server error: {e}")
         
         self.server_thread = threading.Thread(target=run_server, daemon=True)
         self.server_thread.start()
-        logger.info(f"Webhook server thread started")
+        logger.info("Webhook server thread started")
     
     def stop(self):
         """Stop the webhook server"""

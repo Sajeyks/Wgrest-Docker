@@ -7,7 +7,7 @@ Handles reading and parsing WireGuard configuration files
 import os
 import logging
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class WireGuardConfigParser:
             logger.error(f"Error reading config file for {interface_name}: {e}")
             return None
     
-    def read_all_configs(self, interface_names: list = None) -> Dict[str, Optional[str]]:
+    def read_all_configs(self, interface_names: Optional[List[str]] = None) -> Dict[str, Optional[str]]:
         """
         Read all WireGuard configuration files
         

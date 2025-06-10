@@ -117,9 +117,12 @@ class WgrestSyncService:
                 self.database.sync_interfaces(interfaces_data)
             
             # Step 5: Process and sync peers
-            peers_data, peer_counts = self.data_processor.process_peers(all_peers)
-            if peers_data:
-                self.database.sync_peers(peers_data)
+            if all_peers is not None:
+                peers_data, peer_counts = self.data_processor.process_peers(all_peers)
+                if peers_data:
+                    self.database.sync_peers(peers_data)
+            else:
+                peer_counts = {}
             
             # Step 6: Update sync status
             self.database.update_sync_status(peer_counts, 'completed')
@@ -127,7 +130,7 @@ class WgrestSyncService:
             # Step 7: Log verification statistics
             self._log_sync_verification(peer_counts)
             
-            logger.info(f"Structured sync completed successfully")
+            logger.info("Structured sync completed successfully")
             
         except Exception as e:
             logger.error(f"Database sync failed: {e}")

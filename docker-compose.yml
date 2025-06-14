@@ -22,11 +22,13 @@ services:
       - /sys:/sys
       - /proc:/proc
     environment:
-      - WGREST_PORT=${WGREST_PORT}
+      - WGREST_PORT=${WGREST_PORT:-51800}
       - WGREST_API_KEY=${WGREST_API_KEY}
       - SERVER_IP=${SERVER_IP}
-      - WG0_PORT=${WG0_PORT}
-      - WG1_PORT=${WG1_PORT}
+      - WG0_PORT=${WG0_PORT:-51820}
+      - WG1_PORT=${WG1_PORT:-51821}
+      - WG0_SUBNET=${WG0_SUBNET:-10.10.0.0/8}
+      - WG1_SUBNET=${WG1_SUBNET:-10.11.0.0/8}
     depends_on:
       - wireguard
     entrypoint: []
@@ -74,9 +76,9 @@ services:
     container_name: wgrest-sync
     restart: unless-stopped
     ports:
-      - "${WEBHOOK_PORT:-8090}:8090"  # Webhook endpoint
+      - "${WEBHOOK_PORT:-8090}:${WEBHOOK_PORT:-8090}"  # Webhook endpoint
     environment:
-      - WGREST_API_URL=http://localhost:${WGREST_PORT}
+      - WGREST_API_URL=http://localhost:${WGREST_PORT:-51800}
       - WGREST_API_KEY=${WGREST_API_KEY}
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
       # Event-driven sync configuration
@@ -85,11 +87,18 @@ services:
       - DEBOUNCE_SECONDS=5
       # Webhook configuration
       - WEBHOOK_ENABLED=true
-      - WEBHOOK_PORT=8090
-      # Server config
+      - WEBHOOK_PORT=${WEBHOOK_PORT:-8090}
+      # Server config - use environment variables
       - SERVER_IP=${SERVER_IP}
-      - WG0_PORT=${WG0_PORT}
-      - WG1_PORT=${WG1_PORT}
+      - WG0_PORT=${WG0_PORT:-51820}
+      - WG1_PORT=${WG1_PORT:-51821}
+      - WG0_SUBNET=${WG0_SUBNET:-10.10.0.0/8}
+      - WG1_SUBNET=${WG1_SUBNET:-10.11.0.0/8}
+      - WG0_ADDRESS=${WG0_ADDRESS:-10.10.0.1/8}
+      - WG1_ADDRESS=${WG1_ADDRESS:-10.11.0.1/8}
+      - RADIUS_AUTH_PORT=${RADIUS_AUTH_PORT:-1812}
+      - RADIUS_ACCT_PORT=${RADIUS_ACCT_PORT:-1813}
+      - TARGET_WEBSITE_IP=${TARGET_WEBSITE_IP}
       # Encryption (optional)
       - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY:-}
       # Cleanup configuration

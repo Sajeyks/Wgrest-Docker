@@ -21,17 +21,39 @@ export PGUSER=$DB_USER
 export PGPASSWORD=$DB_PASSWORD
 export PGDATABASE=$DB_NAME
 
-# Validate TARGET_WEBSITE_IP
-if [ -z "$TARGET_WEBSITE_IP" ]; then
-    echo "❌ TARGET_WEBSITE_IP not set in .env file"
-    echo "   Please add: TARGET_WEBSITE_IP=1.2.3.4"
-    exit 1
-fi
+# Set defaults for subnet/address variables if not provided
+WG0_SUBNET=${WG0_SUBNET:-"10.10.0.0/8"}
+WG0_ADDRESS=${WG0_ADDRESS:-"10.10.0.1/8"}
+WG1_SUBNET=${WG1_SUBNET:-"10.11.0.0/8"}
+WG1_ADDRESS=${WG1_ADDRESS:-"10.11.0.1/8"}
+RADIUS_AUTH_PORT=${RADIUS_AUTH_PORT:-"1812"}
+RADIUS_ACCT_PORT=${RADIUS_ACCT_PORT:-"1813"}
+WEBHOOK_PORT=${WEBHOOK_PORT:-"8090"}
+
+# Validate required environment variables
+validate_env_var() {
+    local var_name=$1
+    local var_value=${!var_name}
+    if [ -z "$var_value" ]; then
+        echo "❌ $var_name not set in .env file"
+        echo "   Please add: $var_name=<value>"
+        exit 1
+    fi
+}
+
+validate_env_var "TARGET_WEBSITE_IP"
+validate_env_var "SERVER_IP"
+validate_env_var "WG0_PORT"
+validate_env_var "WG1_PORT"
+validate_env_var "WGREST_PORT"
 
 echo "🔄 Starting restoration from external database..."
 echo "📋 Configuration:"
 echo "   Target Website IP: $TARGET_WEBSITE_IP"
 echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
+echo "   WG0: $WG0_ADDRESS on port $WG0_PORT (subnet: $WG0_SUBNET)"
+echo "   WG1: $WG1_ADDRESS on port $WG1_PORT (subnet: $WG1_SUBNET)"
+echo "   FreeRADIUS Ports: $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
 echo ""
 
 # Stop services
@@ -99,17 +121,21 @@ WG0_DATA=$(get_interface_data wg0)
 
 if [ ! -z "$WG0_PRIVATE" ] && [ "$WG0_PRIVATE" != "" ]; then
     # Parse interface data
-    WG0_ADDRESS=$(echo "$WG0_DATA" | cut -d',' -f1)
-    WG0_LISTEN_PORT=$(echo "$WG0_DATA" | cut -d',' -f2)
+    WG0_DB_ADDRESS=$(echo "$WG0_DATA" | cut -d',' -f1)
+    WG0_DB_LISTEN_PORT=$(echo "$WG0_DATA" | cut -d',' -f2)
     
-    # Create interface section
+    # Use database values if available, otherwise use environment defaults
+    WG0_FINAL_ADDRESS=${WG0_DB_ADDRESS:-$WG0_ADDRESS}
+    WG0_FINAL_PORT=${WG0_DB_LISTEN_PORT:-$WG0_PORT}
+    
+    # Create interface section with environment variable based iptables rules
     sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
 [Interface]
 PrivateKey = $WG0_PRIVATE
-Address = ${WG0_ADDRESS:-10.10.0.1/24}
-ListenPort = ${WG0_LISTEN_PORT:-$WG0_PORT}
-PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
+Address = $WG0_FINAL_ADDRESS
+ListenPort = $WG0_FINAL_PORT
+PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
 
 EOF
 
@@ -121,15 +147,15 @@ EOF
     fi
     
     RESTORED_WG0_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg0.conf 2>/dev/null || echo 0)
-    echo "✅ wg0.conf reconstructed with $RESTORED_WG0_PEERS peers"
+    echo "✅ wg0.conf reconstructed with $RESTORED_WG0_PEERS peers (address: $WG0_FINAL_ADDRESS, port: $WG0_FINAL_PORT)"
 else
     echo "⚠️  wg0 server key not found in database, creating basic config"
     sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
 [Interface]
-Address = 10.10.0.1/24
+Address = $WG0_ADDRESS
 ListenPort = $WG0_PORT
-PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
 EOF
 fi
 
@@ -140,17 +166,21 @@ WG1_DATA=$(get_interface_data wg1)
 
 if [ ! -z "$WG1_PRIVATE" ] && [ "$WG1_PRIVATE" != "" ]; then
     # Parse interface data
-    WG1_ADDRESS=$(echo "$WG1_DATA" | cut -d',' -f1)
-    WG1_LISTEN_PORT=$(echo "$WG1_DATA" | cut -d',' -f2)
+    WG1_DB_ADDRESS=$(echo "$WG1_DATA" | cut -d',' -f1)
+    WG1_DB_LISTEN_PORT=$(echo "$WG1_DATA" | cut -d',' -f2)
     
-    # Create interface section
+    # Use database values if available, otherwise use environment defaults
+    WG1_FINAL_ADDRESS=${WG1_DB_ADDRESS:-$WG1_ADDRESS}
+    WG1_FINAL_PORT=${WG1_DB_LISTEN_PORT:-$WG1_PORT}
+    
+    # Create interface section with environment variable based iptables rules
     sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
 PrivateKey = $WG1_PRIVATE
-Address = ${WG1_ADDRESS:-10.11.0.1/24}
-ListenPort = ${WG1_LISTEN_PORT:-$WG1_PORT}
-PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
+Address = $WG1_FINAL_ADDRESS
+ListenPort = $WG1_FINAL_PORT
+PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
 
 EOF
 
@@ -162,15 +192,15 @@ EOF
     fi
     
     RESTORED_WG1_PEERS=$(sudo grep -c '\[Peer\]' /etc/wireguard/wg1.conf 2>/dev/null || echo 0)
-    echo "✅ wg1.conf reconstructed with $RESTORED_WG1_PEERS peers"
+    echo "✅ wg1.conf reconstructed with $RESTORED_WG1_PEERS peers (address: $WG1_FINAL_ADDRESS, port: $WG1_FINAL_PORT)"
 else
     echo "⚠️  wg1 server key not found in database, creating basic config"
     sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
-Address = 10.11.0.1/24
+Address = $WG1_ADDRESS
 ListenPort = $WG1_PORT
-PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
 EOF
 fi
 
@@ -216,7 +246,7 @@ MAX_RETRIES=6
 
 while [ $API_RETRIES -lt $MAX_RETRIES ]; do
     if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/v1/devices/ >/dev/null; then
-        echo "✅ wgrest API is responding"
+        echo "✅ wgrest API is responding on port $WGREST_PORT"
         break
     else
         echo "⏳ wgrest API not ready yet, waiting... (attempt $((API_RETRIES + 1))/$MAX_RETRIES)"
@@ -235,7 +265,7 @@ SYNC_RETRIES=0
 MAX_SYNC_RETRIES=6
 
 while [ $SYNC_RETRIES -lt $MAX_SYNC_RETRIES ]; do
-    if curl -s -X POST -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:8090/sync | grep -q "sync_triggered"; then
+    if curl -s -X POST -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WEBHOOK_PORT/sync | grep -q "sync_triggered"; then
         echo "✅ Sync triggered successfully"
         break
     else
@@ -306,6 +336,12 @@ echo "   Database wg0 peers: $DB_WG0_PEERS"
 echo "   Database wg1 peers: $DB_WG1_PEERS"
 echo "   Restored wg0 peers: ${RESTORED_WG0_PEERS:-$CONFIG_WG0_PEERS}"
 echo "   Restored wg1 peers: ${RESTORED_WG1_PEERS:-$CONFIG_WG1_PEERS}"
+echo ""
+echo "📋 Configuration Used:"
+echo "   WG0: ${WG0_FINAL_ADDRESS:-$WG0_ADDRESS} on port ${WG0_FINAL_PORT:-$WG0_PORT}"
+echo "   WG1: ${WG1_FINAL_ADDRESS:-$WG1_ADDRESS} on port ${WG1_FINAL_PORT:-$WG1_PORT}"
+echo "   FreeRADIUS: ports $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
+echo "   Target Website: $TARGET_WEBSITE_IP"
 echo ""
 echo "🧪 Verify with:"
 echo "   curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/v1/devices/"

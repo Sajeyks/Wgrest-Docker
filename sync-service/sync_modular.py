@@ -2,6 +2,7 @@
 """
 Modular WireGuard sync service
 Event-driven synchronization between wgrest API and PostgreSQL database
+Updated to use environment variables for all subnet and port configurations
 """
 
 import logging
@@ -36,6 +37,7 @@ class WgrestSyncService:
         # Load configuration
         self.config = SyncConfig()
         logger.info("Configuration loaded successfully")
+        logger.info(f"Network configuration: WG0={self.config.wg0_subnet}, WG1={self.config.wg1_subnet}")
         
         # Initialize core components
         self.encryption = EncryptionHelper(self.config.encryption_key)
@@ -46,11 +48,11 @@ class WgrestSyncService:
         )
         self.database = SyncDatabase(self.config.database_url)
         
-        # Initialize data processor
+        # Initialize data processor with configuration
         self.data_processor = DataProcessor(
             encryption_helper=self.encryption,
             config_parser=self.config_parser,
-            subnet_config_func=self.config.get_subnet_config
+            config=self.config  # Pass full config for subnet/port access
         )
         
         # Initialize optional components
@@ -184,6 +186,10 @@ class WgrestSyncService:
                 for interface_name, peer_count, psk_count, endpoint_count in peer_stats:
                     logger.info(f"Interface {interface_name}: {peer_count} peers, "
                                f"{psk_count} with PSK, {endpoint_count} with endpoints")
+            
+            # Log network configuration being used
+            logger.info(f"Network config: WG0={self.config.wg0_subnet} on port {self.config.wg0_port}, "
+                       f"WG1={self.config.wg1_subnet} on port {self.config.wg1_port}")
             
         except Exception as e:
             logger.error(f"Failed to log verification stats: {e}")

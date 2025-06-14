@@ -4,10 +4,10 @@ data_dir = "/app/data"
 
 [interfaces.wg0]
 config_path = "/etc/wireguard/wg0.conf"
-subnet = "10.10.0.0/24"
+subnet = "${WG0_SUBNET}"
 endpoint = "${SERVER_IP}:${WG0_PORT}"
 
 [interfaces.wg1]
 config_path = "/etc/wireguard/wg1.conf"
-subnet = "10.11.0.0/24"
+subnet = "${WG1_SUBNET}"
 endpoint = "${SERVER_IP}:${WG1_PORT}"

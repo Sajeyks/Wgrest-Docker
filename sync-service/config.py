@@ -15,7 +15,7 @@ class SyncConfig:
     
     def __init__(self):
         # Core API Configuration
-        self.wgrest_port = os.getenv('WGREST_PORT', '51822')
+        self.wgrest_port = os.getenv('WGREST_PORT', '8080')
         self.wgrest_api_url = os.getenv('WGREST_API_URL', f'http://localhost:{self.wgrest_port}')
         self.wgrest_api_key = os.getenv('WGREST_API_KEY')
         self.database_url = os.getenv('DATABASE_URL')
@@ -35,10 +35,24 @@ class SyncConfig:
         self.cleanup_older_than_hours = int(os.getenv('CLEANUP_OLDER_THAN_HOURS', 24))
         self.cleanup_time = os.getenv('CLEANUP_TIME', '02:00')
         
-        # Server Configuration
+        # WireGuard Configuration - Use environment variables for all subnets and ports
         self.server_ip = os.getenv('SERVER_IP', 'localhost')
+        
+        # WG0 Configuration
         self.wg0_port = os.getenv('WG0_PORT', '51820')
+        self.wg0_subnet = os.getenv('WG0_SUBNET', '10.10.0.0/8')
+        self.wg0_address = os.getenv('WG0_ADDRESS', '10.10.0.1/8')
+        
+        # WG1 Configuration
         self.wg1_port = os.getenv('WG1_PORT', '51821')
+        self.wg1_subnet = os.getenv('WG1_SUBNET', '10.11.0.0/8')
+        self.wg1_address = os.getenv('WG1_ADDRESS', '10.11.0.1/8')
+        
+        # FreeRADIUS Configuration
+        self.radius_auth_port = os.getenv('RADIUS_AUTH_PORT', '1812')
+        self.radius_acct_port = os.getenv('RADIUS_ACCT_PORT', '1813')
+        
+        # Target configuration
         self.target_website_ip = os.getenv('TARGET_WEBSITE_IP', '127.0.0.1')
         
         # Validate required settings
@@ -61,6 +75,7 @@ class SyncConfig:
         required_vars = [
             ('WGREST_API_KEY', self.wgrest_api_key),
             ('DATABASE_URL', self.database_url),
+            ('SERVER_IP', self.server_ip),
         ]
         
         missing_vars = [name for name, value in required_vars if not value]
@@ -73,6 +88,7 @@ class SyncConfig:
         
         logger.info(f"Configuration loaded: sync_mode={self.sync_mode}, "
                    f"webhook_enabled={self.webhook_enabled}, cleanup_enabled={self.cleanup_enabled}")
+        logger.info(f"WireGuard subnets: wg0={self.wg0_subnet}, wg1={self.wg1_subnet}")
     
     @property
     def request_headers(self) -> dict:
@@ -83,13 +99,39 @@ class SyncConfig:
         """Get subnet configuration for interface"""
         if interface_name == 'wg0':
             return {
-                'subnet': '10.10.0.0/24',
-                'endpoint': f"{self.server_ip}:{self.wg0_port}"
+                'subnet': self.wg0_subnet,
+                'endpoint': f"{self.server_ip}:{self.wg0_port}",
+                'address': self.wg0_address
             }
         elif interface_name == 'wg1':
             return {
-                'subnet': '10.11.0.0/24',
-                'endpoint': f"{self.server_ip}:{self.wg1_port}"
+                'subnet': self.wg1_subnet,
+                'endpoint': f"{self.server_ip}:{self.wg1_port}",
+                'address': self.wg1_address
             }
         else:
-            return {'subnet': '', 'endpoint': ''}
+            return {'subnet': '', 'endpoint': '', 'address': ''}
+    
+    def get_wg0_postup_rules(self) -> str:
+        """Get PostUp iptables rules for wg0 (FreeRADIUS)"""
+        subnet_base = self.wg0_subnet.split('/')[0].rsplit('.', 1)[0] + '.0'
+        return (f"iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport {self.radius_auth_port} -j ACCEPT; "
+                f"iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport {self.radius_acct_port} -j ACCEPT; "
+                f"iptables -t nat -A POSTROUTING -s {self.wg0_subnet} -d 127.0.0.1 -j MASQUERADE")
+    
+    def get_wg0_postdown_rules(self) -> str:
+        """Get PostDown iptables rules for wg0 (FreeRADIUS)"""
+        subnet_base = self.wg0_subnet.split('/')[0].rsplit('.', 1)[0] + '.0'
+        return (f"iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport {self.radius_auth_port} -j ACCEPT; "
+                f"iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport {self.radius_acct_port} -j ACCEPT; "
+                f"iptables -t nat -D POSTROUTING -s {self.wg0_subnet} -d 127.0.0.1 -j MASQUERADE")
+    
+    def get_wg1_postup_rules(self) -> str:
+        """Get PostUp iptables rules for wg1 (MikroTik)"""
+        return (f"iptables -A FORWARD -i wg1 -d {self.target_website_ip} -j ACCEPT; "
+                f"iptables -t nat -A POSTROUTING -s {self.wg1_subnet} -d {self.target_website_ip} -j MASQUERADE")
+    
+    def get_wg1_postdown_rules(self) -> str:
+        """Get PostDown iptables rules for wg1 (MikroTik)"""
+        return (f"iptables -D FORWARD -i wg1 -d {self.target_website_ip} -j ACCEPT; "
+                f"iptables -t nat -D POSTROUTING -s {self.wg1_subnet} -d {self.target_website_ip} -j MASQUERADE")

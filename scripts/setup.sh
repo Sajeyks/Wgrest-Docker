@@ -18,19 +18,41 @@ export PGUSER=$DB_USER
 export PGPASSWORD=$DB_PASSWORD
 export PGDATABASE=$DB_NAME
 
-# Validate TARGET_WEBSITE_IP
-if [ -z "$TARGET_WEBSITE_IP" ]; then
-    echo "❌ TARGET_WEBSITE_IP not set in .env file"
-    echo "   Please add: TARGET_WEBSITE_IP=1.2.3.4"
-    exit 1
-fi
+# Validate required environment variables
+validate_env_var() {
+    local var_name=$1
+    local var_value=${!var_name}
+    if [ -z "$var_value" ]; then
+        echo "❌ $var_name not set in .env file"
+        echo "   Please add: $var_name=<value>"
+        exit 1
+    fi
+}
+
+# Validate all required variables
+validate_env_var "TARGET_WEBSITE_IP"
+validate_env_var "SERVER_IP"
+validate_env_var "WG0_PORT"
+validate_env_var "WG1_PORT"
+validate_env_var "WGREST_PORT"
+
+# Set defaults for subnet/address variables if not provided
+WG0_SUBNET=${WG0_SUBNET:-"10.10.0.0/8"}
+WG0_ADDRESS=${WG0_ADDRESS:-"10.10.0.1/8"}
+WG1_SUBNET=${WG1_SUBNET:-"10.11.0.0/8"}
+WG1_ADDRESS=${WG1_ADDRESS:-"10.11.0.1/8"}
+RADIUS_AUTH_PORT=${RADIUS_AUTH_PORT:-"1812"}
+RADIUS_ACCT_PORT=${RADIUS_ACCT_PORT:-"1813"}
+WEBHOOK_PORT=${WEBHOOK_PORT:-"8090"}
 
 echo "📋 Configuration loaded:"
 echo "   Server IP: $SERVER_IP"
-echo "   WG0 Port: $WG0_PORT"
-echo "   WG1 Port: $WG1_PORT"
+echo "   WG0: $WG0_ADDRESS on port $WG0_PORT (subnet: $WG0_SUBNET)"
+echo "   WG1: $WG1_ADDRESS on port $WG1_PORT (subnet: $WG1_SUBNET)"
 echo "   wgrest Port: $WGREST_PORT"
+echo "   Webhook Port: $WEBHOOK_PORT"
 echo "   Target Website IP: $TARGET_WEBSITE_IP"
+echo "   FreeRADIUS Ports: $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
 echo ""
 
 # Test external database connection
@@ -118,7 +140,7 @@ if netstat -ulpn | grep -q ":$WG0_PORT "; then
     sudo fuser -k $WG0_PORT/udp 2>/dev/null || true
 fi
 
-if netstat -tlpn | grep -q ":$WG1_PORT "; then
+if netstat -ulpn | grep -q ":$WG1_PORT "; then
     echo "⚠️  Port $WG1_PORT is in use. Attempting to free it..."
     sudo fuser -k $WG1_PORT/udp 2>/dev/null || true
 fi
@@ -126,6 +148,11 @@ fi
 if netstat -tlpn | grep -q ":$WGREST_PORT "; then
     echo "⚠️  Port $WGREST_PORT is in use. Attempting to free it..."
     sudo fuser -k $WGREST_PORT/tcp 2>/dev/null || true
+fi
+
+if netstat -tlpn | grep -q ":$WEBHOOK_PORT "; then
+    echo "⚠️  Port $WEBHOOK_PORT is in use. Attempting to free it..."
+    sudo fuser -k $WEBHOOK_PORT/tcp 2>/dev/null || true
 fi
 
 # Generate WireGuard keys (but don't store them yet - let sync service handle it)
@@ -137,7 +164,7 @@ WG1_PUBLIC=$(echo $WG1_PRIVATE | wg pubkey)
 
 echo "🔐 Keys will be encrypted and stored by sync service after configs are created"
 
-# Create initial WireGuard configs
+# Create initial WireGuard configs using environment variables
 echo "📝 Creating initial WireGuard configurations..."
 sudo mkdir -p /etc/wireguard
 
@@ -149,24 +176,24 @@ if [ -f /etc/wireguard/wg1.conf ]; then
     sudo cp /etc/wireguard/wg1.conf /etc/wireguard/wg1.conf.backup.$(date +%s)
 fi
 
-# wg0 config (FreeRADIUS)
+# wg0 config (FreeRADIUS) - using environment variables
 sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
 [Interface]
 PrivateKey = $WG0_PRIVATE
-Address = 10.10.0.1/24
+Address = $WG0_ADDRESS
 ListenPort = $WG0_PORT
-PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1812 -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport 1813 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -d 127.0.0.1 -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
 EOF
 
-# wg1 config (MikroTik) - FIXED to use TARGET_WEBSITE_IP
+# wg1 config (MikroTik) - using environment variables
 sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
 PrivateKey = $WG1_PRIVATE
-Address = 10.11.0.1/24
+Address = $WG1_ADDRESS
 ListenPort = $WG1_PORT
-PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.11.0.0/24 -d $TARGET_WEBSITE_IP -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
 EOF
 
 # Set permissions
@@ -181,7 +208,7 @@ sudo wg-quick down wg1 2>/dev/null || true
 
 # Start wg0
 if sudo wg-quick up wg0; then
-    echo "✅ wg0 interface started successfully"
+    echo "✅ wg0 interface started successfully on $WG0_ADDRESS:$WG0_PORT"
 else
     echo "❌ Failed to start wg0 interface"
     exit 1
@@ -189,7 +216,7 @@ fi
 
 # Start wg1
 if sudo wg-quick up wg1; then
-    echo "✅ wg1 interface started successfully"
+    echo "✅ wg1 interface started successfully on $WG1_ADDRESS:$WG1_PORT"
 else
     echo "❌ Failed to start wg1 interface"
     exit 1
@@ -200,11 +227,12 @@ echo "🔄 Enabling WireGuard interfaces to start on boot..."
 sudo systemctl enable wg-quick@wg0
 sudo systemctl enable wg-quick@wg1
 
-# Setup iptables rules
+# Setup iptables rules - using environment variables
 echo "🔥 Setting up firewall rules..."
 sudo iptables -A INPUT -p udp --dport $WG0_PORT -j ACCEPT 2>/dev/null || true
 sudo iptables -A INPUT -p udp --dport $WG1_PORT -j ACCEPT 2>/dev/null || true
 sudo iptables -A INPUT -p tcp --dport $WGREST_PORT -j ACCEPT 2>/dev/null || true
+sudo iptables -A INPUT -p tcp --dport $WEBHOOK_PORT -j ACCEPT 2>/dev/null || true
 
 # Enable IP forwarding
 echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
@@ -230,7 +258,7 @@ MAX_RETRIES=6
 
 while [ $API_RETRIES -lt $MAX_RETRIES ]; do
     if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/v1/devices/ >/dev/null; then
-        echo "✅ wgrest API is responding"
+        echo "✅ wgrest API is responding on port $WGREST_PORT"
         break
     else
         echo "⏳ wgrest API not ready yet, waiting... (attempt $((API_RETRIES + 1))/$MAX_RETRIES)"
@@ -267,7 +295,7 @@ SYNC_RETRIES=0
 MAX_SYNC_RETRIES=10
 
 while [ $SYNC_RETRIES -lt $MAX_SYNC_RETRIES ]; do
-    if curl -s -X POST -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:8090/sync | grep -q "sync_triggered"; then
+    if curl -s -X POST -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WEBHOOK_PORT/sync | grep -q "sync_triggered"; then
         echo "✅ Initial sync triggered successfully"
         break
     else
@@ -329,6 +357,11 @@ echo "   🗄️  External Database: $DB_HOST:$DB_PORT/$DB_NAME"
 echo "   🎯 Target Website IP: $TARGET_WEBSITE_IP"
 echo "   🔐 Server keys encrypted and stored in database"
 echo ""
+echo "📋 Network Configuration:"
+echo "   wg0: $WG0_ADDRESS (subnet: $WG0_SUBNET) on port $WG0_PORT"
+echo "   wg1: $WG1_ADDRESS (subnet: $WG1_SUBNET) on port $WG1_PORT"
+echo "   FreeRADIUS: ports $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
+echo ""
 echo "🔗 WireGuard Interface Status:"
 sudo wg show
 echo ""
@@ -336,7 +369,7 @@ echo "🔧 Next steps:"
 echo "   1. Configure your Django app to use this wgrest API"
 echo "   2. Create peers via Django -> wgrest API"
 echo "   3. Database automatically syncs on changes (event-driven)"
-echo "   4. Manual sync available: curl -X POST -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:8090/sync"
+echo "   4. Manual sync available: curl -X POST -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WEBHOOK_PORT/sync"
 echo ""
 echo "💾 Backup strategy:"
 echo "   - All data (including encrypted keys) stored in external PostgreSQL"

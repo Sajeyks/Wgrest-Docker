@@ -13,18 +13,18 @@ logger = logging.getLogger(__name__)
 class DataProcessor:
     """Processes and transforms data for sync operations"""
     
-    def __init__(self, encryption_helper, config_parser, subnet_config_func):
+    def __init__(self, encryption_helper, config_parser, config):
         """
         Initialize data processor
         
         Args:
             encryption_helper: EncryptionHelper instance
             config_parser: WireGuardConfigParser instance  
-            subnet_config_func: Function to get subnet config for interface
+            config: SyncConfig instance with all configuration
         """
         self.encryption = encryption_helper
         self.config_parser = config_parser
-        self.get_subnet_config = subnet_config_func
+        self.config = config
     
     def process_server_keys(self, configs: Dict[str, str], api_client) -> List[Tuple[str, str, str]]:
         """
@@ -44,7 +44,7 @@ class DataProcessor:
                 continue
                 
             config_details = self.config_parser.parse_config_content(
-                config_content, interface_name, self.get_subnet_config(interface_name)
+                config_content, interface_name, self.config.get_subnet_config(interface_name)
             )
             
             private_key = config_details.get('private_key')
@@ -90,8 +90,9 @@ class DataProcessor:
         
         for interface_name, interface_data in wgrest_interfaces.items():
             config_content = configs.get(interface_name, '')
+            subnet_config = self.config.get_subnet_config(interface_name)
             config_details = self.config_parser.parse_config_content(
-                config_content, interface_name, self.get_subnet_config(interface_name)
+                config_content, interface_name, subnet_config
             )
             
             # Get and encrypt private key
@@ -102,10 +103,10 @@ class DataProcessor:
                 'name': interface_name,
                 'private_key': private_key_encrypted,
                 'public_key': interface_data.get('public_key', ''),
-                'address': config_details.get('address', ''),
+                'address': config_details.get('address', subnet_config.get('address', '')),
                 'listen_port': interface_data.get('listen_port', config_details.get('listen_port', 0)),
-                'subnet': config_details.get('subnet', ''),
-                'endpoint': config_details.get('endpoint', '')
+                'subnet': subnet_config.get('subnet', ''),
+                'endpoint': subnet_config.get('endpoint', '')
             }
             
             interfaces_data.append(interface_db_data)

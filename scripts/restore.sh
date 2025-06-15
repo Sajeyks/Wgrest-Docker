@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🔄 WireGuard Database Restoration (YunoHost Compatible)"
+echo "🔄 WireGuard Database Restoration (Django Local Privileges Architecture)"
 echo ""
 echo "⚠️  This will restore WireGuard from external PostgreSQL database"
 echo "   Make sure your database is restored first!"
@@ -41,19 +41,18 @@ validate_env_var() {
     fi
 }
 
-validate_env_var "TARGET_WEBSITE_IP"
 validate_env_var "SERVER_IP"
 validate_env_var "WG0_PORT"
 validate_env_var "WG1_PORT"
 validate_env_var "WGREST_PORT"
 
-echo "🔄 Starting restoration from external database..."
+echo "🔄 Starting restoration with Django Local Privileges architecture..."
 echo "📋 Configuration:"
-echo "   Target Website IP: $TARGET_WEBSITE_IP"
 echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
-echo "   WG0: $WG0_ADDRESS on port $WG0_PORT (subnet: $WG0_SUBNET)"
-echo "   WG1: $WG1_ADDRESS on port $WG1_PORT (subnet: $WG1_SUBNET)"
+echo "   WG0 (MikroTik↔FreeRADIUS): $WG0_ADDRESS on port $WG0_PORT (subnet: $WG0_SUBNET)"
+echo "   WG1 (Django↔MikroTik): $WG1_ADDRESS on port $WG1_PORT (subnet: $WG1_SUBNET)"
 echo "   FreeRADIUS Ports: $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
+echo "   Django: Local privileges (no peer config)"
 echo ""
 
 # Stop services
@@ -65,11 +64,6 @@ echo "🔍 Checking external database connection..."
 if ! psql -c "SELECT COUNT(*) FROM peers;" &>/dev/null; then
     echo "❌ Cannot connect to external database or no data found"
     echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
-    echo "   Make sure:"
-    echo "   1. Database server is accessible"
-    echo "   2. Credentials are correct"
-    echo "   3. Database has been restored from backup"
-    echo "   4. Password in .env file is correct"
     exit 1
 fi
 
@@ -78,8 +72,8 @@ WG0_PEERS=$(psql -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg0';" 
 WG1_PEERS=$(psql -t -c "SELECT COUNT(*) FROM peers WHERE interface_name='wg1';" | xargs)
 
 echo "📊 Found in database:"
-echo "   wg0: $WG0_PEERS peers"
-echo "   wg1: $WG1_PEERS peers"
+echo "   wg0: $WG0_PEERS peers (MikroTik routers)"
+echo "   wg1: $WG1_PEERS peers (MikroTik routers for Django API)"
 
 # Check if our decrypt helper exists
 if [ ! -f "scripts/decrypt_helper.py" ]; then
@@ -106,14 +100,6 @@ save_iptables_rules() {
     sudo iptables-save > /etc/iptables/rules.v4
     sudo ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
     echo "✅ Rules saved to /etc/iptables/rules.v4"
-}
-
-# Function to restore iptables rules manually  
-restore_iptables_rules() {
-    if [ -f /etc/iptables/rules.v4 ]; then
-        sudo iptables-restore < /etc/iptables/rules.v4
-        echo "✅ Rules restored from /etc/iptables/rules.v4"
-    fi
 }
 
 # Ensure systemd service exists for rule restoration on boot
@@ -270,23 +256,37 @@ fi
 # Set permissions
 sudo chmod 600 /etc/wireguard/wg*.conf
 
-# Setup persistent firewall rules (NO DUPLICATES) - Same as setup.sh
-echo "🔥 Ensuring persistent firewall rules are in place..."
+# Setup correct firewall rules for Django Local Privileges architecture
+echo "🔥 Ensuring correct firewall rules for Django Local Privileges..."
 
-# INPUT rules for WireGuard and services
-add_persistent_rule "filter" "INPUT" "-p udp --dport $WG0_PORT -j ACCEPT" "WG0 UDP (port $WG0_PORT)"
-add_persistent_rule "filter" "INPUT" "-p udp --dport $WG1_PORT -j ACCEPT" "WG1 UDP (port $WG1_PORT)"
-add_persistent_rule "filter" "INPUT" "-p tcp --dport $WGREST_PORT -j ACCEPT" "wgrest TCP (port $WGREST_PORT)"
-add_persistent_rule "filter" "INPUT" "-p tcp --dport $WEBHOOK_PORT -j ACCEPT" "webhook TCP (port $WEBHOOK_PORT)"
+# INPUT rules for WireGuard ports and services
+add_persistent_rule "filter" "INPUT" "-p udp --dport $WG0_PORT -j ACCEPT" "WG0 UDP (MikroTik connections)"
+add_persistent_rule "filter" "INPUT" "-p udp --dport $WG1_PORT -j ACCEPT" "WG1 UDP (Django connections)"
+add_persistent_rule "filter" "INPUT" "-p tcp --dport $WGREST_PORT -j ACCEPT" "wgrest API"
+add_persistent_rule "filter" "INPUT" "-p tcp --dport $WEBHOOK_PORT -j ACCEPT" "webhook"
 
-# FORWARD rules for WireGuard routing
-add_persistent_rule "filter" "FORWARD" "-i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT" "WG0 → FreeRADIUS auth"
-add_persistent_rule "filter" "FORWARD" "-i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT" "WG0 → FreeRADIUS acct"
-add_persistent_rule "filter" "FORWARD" "-i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT" "WG1 → target website"
+# FORWARD rules for WG0: MikroTik ↔ FreeRADIUS (bidirectional)
+echo "🔀 Setting up WG0 FORWARD rules (MikroTik ↔ FreeRADIUS)..."
+add_persistent_rule "filter" "FORWARD" "-i wg0 -d 127.0.0.1 -p udp --dport $RADIUS_AUTH_PORT -j ACCEPT" "MikroTik → FreeRADIUS auth"
+add_persistent_rule "filter" "FORWARD" "-i wg0 -d 127.0.0.1 -p udp --dport $RADIUS_ACCT_PORT -j ACCEPT" "MikroTik → FreeRADIUS acct"
+add_persistent_rule "filter" "FORWARD" "-o wg0 -s 127.0.0.1 -p udp --sport $RADIUS_AUTH_PORT -j ACCEPT" "FreeRADIUS auth → MikroTik"
+add_persistent_rule "filter" "FORWARD" "-o wg0 -s 127.0.0.1 -p udp --sport $RADIUS_ACCT_PORT -j ACCEPT" "FreeRADIUS acct → MikroTik"
 
-# NAT rules for WireGuard masquerading
-add_persistent_rule "nat" "POSTROUTING" "-s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE" "WG0 NAT (FreeRADIUS)"
-add_persistent_rule "nat" "POSTROUTING" "-s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE" "WG1 NAT (MikroTik)"
+# FORWARD rules for WG1: Django (localhost) ↔ MikroTik (bidirectional)
+echo "🔀 Setting up WG1 FORWARD rules (Django local ↔ MikroTik)..."
+add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -j ACCEPT" "Django (local) → MikroTik"
+add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -j ACCEPT" "MikroTik → Django (local)"
+
+# Block general internet access for security
+echo "🔒 Blocking general internet access..."
+add_persistent_rule "filter" "FORWARD" "-i wg0 ! -d 127.0.0.1 -j DROP" "Block WG0 internet access"
+add_persistent_rule "filter" "FORWARD" "-i wg1 ! -d 127.0.0.1 -j DROP" "Block WG1 internet access"
+
+# NAT rules: Minimal masquerading for required services only
+echo "🎭 Setting up minimal NAT rules..."
+add_persistent_rule "nat" "POSTROUTING" "-s 10.10.0.0/16 -d 127.0.0.1 -p udp --dport $RADIUS_AUTH_PORT -j MASQUERADE" "WG0 → FreeRADIUS auth NAT"
+add_persistent_rule "nat" "POSTROUTING" "-s 10.10.0.0/16 -d 127.0.0.1 -p udp --dport $RADIUS_ACCT_PORT -j MASQUERADE" "WG0 → FreeRADIUS acct NAT"
+add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -j MASQUERADE" "Django (local) → MikroTik NAT"
 
 # Enable IP forwarding
 echo "🔀 Ensuring IP forwarding is enabled..."
@@ -418,49 +418,46 @@ fi
 
 # Show firewall status
 echo ""
-echo "🔥 Firewall Rules Status:"
+echo "🔥 Firewall Rules Status (Django Local Privileges):"
 echo "   INPUT rules:"
 sudo iptables -L INPUT -n | grep -E "(51820|51821|$WGREST_PORT|$WEBHOOK_PORT)" | head -4
 echo "   FORWARD rules:"
-sudo iptables -L FORWARD -n | grep -E "(wg0|wg1)" | head -3
+sudo iptables -L FORWARD -n | grep -E "(wg0|wg1|127\.0\.0\.1)" | head -6
 echo "   NAT rules:"
-sudo iptables -t nat -L POSTROUTING -n | grep -E "($WG0_SUBNET|$WG1_SUBNET)" | head -2
+sudo iptables -t nat -L POSTROUTING -n | grep -E "(127\.0\.0\.1|$RADIUS_AUTH_PORT|$RADIUS_ACCT_PORT)" | head -3
 
 echo ""
-echo "✅ Database restoration completed with YunoHost-compatible persistence!"
+echo "✅ Database restoration completed with Django Local Privileges architecture!"
 echo ""
 echo "🔄 The restoration process:"
 echo "   1. ✅ Read structured data from external PostgreSQL"
 echo "   2. ✅ Decrypted sensitive fields using existing decrypt helper"
 echo "   3. ✅ Reconstructed clean WireGuard config files (no PostUp/PostDown)"
-echo "   4. ✅ Ensured persistent firewall rules are in place"
+echo "   4. ✅ Applied Django Local Privileges firewall rules"
 echo "   5. ✅ Started WireGuard interfaces"
 echo "   6. ✅ Started Docker services with improved sync service"
 echo "   7. ✅ Triggered sync to ensure wgrest API consistency"
 echo ""
 echo "📊 Restoration Summary:"
-echo "   Database wg0 peers: $DB_WG0_PEERS"
-echo "   Database wg1 peers: $DB_WG1_PEERS"
+echo "   Database wg0 peers: $DB_WG0_PEERS (MikroTik routers for FreeRADIUS)"
+echo "   Database wg1 peers: $DB_WG1_PEERS (MikroTik routers for Django API)"
 echo "   Restored wg0 peers: ${RESTORED_WG0_PEERS:-$CONFIG_WG0_PEERS}"
 echo "   Restored wg1 peers: ${RESTORED_WG1_PEERS:-$CONFIG_WG1_PEERS}"
 echo ""
 echo "📋 Configuration Used:"
-echo "   WG0: ${WG0_FINAL_ADDRESS:-$WG0_ADDRESS} on port ${WG0_FINAL_PORT:-$WG0_PORT}"
-echo "   WG1: ${WG1_FINAL_ADDRESS:-$WG1_ADDRESS} on port ${WG1_FINAL_PORT:-$WG1_PORT}"
+echo "   WG0 (MikroTik↔FreeRADIUS): ${WG0_FINAL_ADDRESS:-$WG0_ADDRESS} on port ${WG0_FINAL_PORT:-$WG0_PORT}"
+echo "   WG1 (Django↔MikroTik): ${WG1_FINAL_ADDRESS:-$WG1_ADDRESS} on port ${WG1_FINAL_PORT:-$WG1_PORT}"
 echo "   FreeRADIUS: ports $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
-echo "   Target Website: $TARGET_WEBSITE_IP"
 echo ""
-echo "🔥 YunoHost-Compatible Persistence:"
-echo "   ✅ Manual rule management (no package conflicts)"
-echo "   ✅ Rules saved to /etc/iptables/rules.v4"
-echo "   ✅ Systemd service for boot restoration"
-echo "   ✅ No duplicates created on restore"
-echo ""
-echo "💾 Manual Persistence Commands:"
-echo "   Save: sudo iptables-save > /etc/iptables/rules.v4"
-echo "   Restore: sudo iptables-restore < /etc/iptables/rules.v4"
-echo "   Service: sudo systemctl status iptables-restore-wireguard"
+echo "🏗️ Architecture:"
+echo "   📱 WG0: MikroTik peers connect for FreeRADIUS authentication"
+echo "   💻 WG1: MikroTik peers connect for Django API management"
+echo "   🏠 Django: Local privileges (direct wg1 interface access)"
+echo "   🔒 Security: No general internet access allowed"
 echo ""
 echo "🧪 Verify with:"
 echo "   curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/v1/devices/"
-echo "   sudo iptables -L INPUT -n | grep -E '(51820|51821)'"
+echo "   sudo iptables -L FORWARD -n | grep wg1"
+echo ""
+echo "📋 Migration ready:"
+echo "   When Django moves remote, follow migration-guide.md"

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🔄 WireGuard Database Restoration"
+echo "🔄 WireGuard Database Restoration (No Duplicate Rules)"
 echo ""
 echo "⚠️  This will restore WireGuard from external PostgreSQL database"
 echo "   Make sure your database is restored first!"
@@ -94,6 +94,39 @@ pip3 install -q psycopg2-binary cryptography python-dotenv 2>/dev/null || {
     echo "⚠️  Could not install Python dependencies, trying without..."
 }
 
+# Ensure iptables-persistent is installed
+echo "📦 Ensuring iptables-persistent is available..."
+if ! dpkg -l | grep -q iptables-persistent; then
+    echo "   Installing iptables-persistent..."
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
+    echo "✅ iptables-persistent installed"
+fi
+
+# Function to add iptables rule only if it doesn't exist
+add_persistent_rule() {
+    local table=${1:-filter}
+    local chain=$2
+    local rule=$3
+    local description=$4
+    
+    if [ "$table" = "nat" ]; then
+        if ! sudo iptables -t nat -C $chain $rule 2>/dev/null; then
+            sudo iptables -t nat -A $chain $rule
+            echo "✅ Added $description"
+        else
+            echo "ℹ️  $description already exists"
+        fi
+    else
+        if ! sudo iptables -C $chain $rule 2>/dev/null; then
+            sudo iptables -A $chain $rule
+            echo "✅ Added $description"
+        else
+            echo "ℹ️  $description already exists"
+        fi
+    fi
+}
+
 # Restore WireGuard configs from structured database data
 echo "📝 Reconstructing WireGuard configurations from structured data..."
 sudo rm -f /etc/wireguard/wg*.conf
@@ -128,14 +161,12 @@ if [ ! -z "$WG0_PRIVATE" ] && [ "$WG0_PRIVATE" != "" ]; then
     WG0_FINAL_ADDRESS=${WG0_DB_ADDRESS:-$WG0_ADDRESS}
     WG0_FINAL_PORT=${WG0_DB_LISTEN_PORT:-$WG0_PORT}
     
-    # Create interface section with environment variable based iptables rules
+    # Create clean interface section (NO PostUp/PostDown - using persistent rules)
     sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
 [Interface]
 PrivateKey = $WG0_PRIVATE
 Address = $WG0_FINAL_ADDRESS
 ListenPort = $WG0_FINAL_PORT
-PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
 
 EOF
 
@@ -154,8 +185,6 @@ else
 [Interface]
 Address = $WG0_ADDRESS
 ListenPort = $WG0_PORT
-PostUp = iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -A FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT; iptables -D FORWARD -i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE
 EOF
 fi
 
@@ -173,14 +202,12 @@ if [ ! -z "$WG1_PRIVATE" ] && [ "$WG1_PRIVATE" != "" ]; then
     WG1_FINAL_ADDRESS=${WG1_DB_ADDRESS:-$WG1_ADDRESS}
     WG1_FINAL_PORT=${WG1_DB_LISTEN_PORT:-$WG1_PORT}
     
-    # Create interface section with environment variable based iptables rules
+    # Create clean interface section (NO PostUp/PostDown - using persistent rules)
     sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
 [Interface]
 PrivateKey = $WG1_PRIVATE
 Address = $WG1_FINAL_ADDRESS
 ListenPort = $WG1_FINAL_PORT
-PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
 
 EOF
 
@@ -199,13 +226,41 @@ else
 [Interface]
 Address = $WG1_ADDRESS
 ListenPort = $WG1_PORT
-PostUp = iptables -A FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -A POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT; iptables -t nat -D POSTROUTING -s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE
 EOF
 fi
 
 # Set permissions
 sudo chmod 600 /etc/wireguard/wg*.conf
+
+# Setup persistent firewall rules (NO DUPLICATES) - Same as setup.sh
+echo "🔥 Ensuring persistent firewall rules are in place..."
+
+# INPUT rules for WireGuard and services
+add_persistent_rule "filter" "INPUT" "-p udp --dport $WG0_PORT -j ACCEPT" "WG0 UDP (port $WG0_PORT)"
+add_persistent_rule "filter" "INPUT" "-p udp --dport $WG1_PORT -j ACCEPT" "WG1 UDP (port $WG1_PORT)"
+add_persistent_rule "filter" "INPUT" "-p tcp --dport $WGREST_PORT -j ACCEPT" "wgrest TCP (port $WGREST_PORT)"
+add_persistent_rule "filter" "INPUT" "-p tcp --dport $WEBHOOK_PORT -j ACCEPT" "webhook TCP (port $WEBHOOK_PORT)"
+
+# FORWARD rules for WireGuard routing
+add_persistent_rule "filter" "FORWARD" "-i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_AUTH_PORT -j ACCEPT" "WG0 → FreeRADIUS auth"
+add_persistent_rule "filter" "FORWARD" "-i wg0 -p udp -d 127.0.0.1 --dport $RADIUS_ACCT_PORT -j ACCEPT" "WG0 → FreeRADIUS acct"
+add_persistent_rule "filter" "FORWARD" "-i wg1 -d $TARGET_WEBSITE_IP -j ACCEPT" "WG1 → target website"
+
+# NAT rules for WireGuard masquerading
+add_persistent_rule "nat" "POSTROUTING" "-s $WG0_SUBNET -d 127.0.0.1 -j MASQUERADE" "WG0 NAT (FreeRADIUS)"
+add_persistent_rule "nat" "POSTROUTING" "-s $WG1_SUBNET -d $TARGET_WEBSITE_IP -j MASQUERADE" "WG1 NAT (MikroTik)"
+
+# Enable IP forwarding
+echo "🔀 Ensuring IP forwarding is enabled..."
+if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+    echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
+fi
+sudo sysctl -p
+
+# Save all iptables rules persistently
+echo "💾 Saving iptables rules persistently..."
+sudo netfilter-persistent save
+echo "✅ All firewall rules saved and will persist across reboots"
 
 # Start WireGuard interfaces manually (before Docker services)
 echo "🚀 Starting WireGuard interfaces..."
@@ -230,6 +285,11 @@ if [ -f /etc/wireguard/wg1.conf ]; then
         echo "⚠️  wg1 interface start failed, but continuing..."
     fi
 fi
+
+# Enable interfaces to start on boot
+echo "🔄 Enabling WireGuard interfaces to start on boot..."
+sudo systemctl enable wg-quick@wg0
+sudo systemctl enable wg-quick@wg1
 
 # Start all services
 echo "🚀 Starting all services..."
@@ -320,16 +380,27 @@ else
     echo "⚠️  WireGuard interfaces not accessible"
 fi
 
+# Show firewall status
 echo ""
-echo "✅ Database restoration completed!"
+echo "🔥 Firewall Rules Status:"
+echo "   INPUT rules:"
+sudo iptables -L INPUT -n | grep -E "(51820|51821|$WGREST_PORT|$WEBHOOK_PORT)" | head -4
+echo "   FORWARD rules:"
+sudo iptables -L FORWARD -n | grep -E "(wg0|wg1)" | head -3
+echo "   NAT rules:"
+sudo iptables -t nat -L POSTROUTING -n | grep -E "($WG0_SUBNET|$WG1_SUBNET)" | head -2
+
+echo ""
+echo "✅ Database restoration completed with persistent firewall rules!"
 echo ""
 echo "🔄 The restoration process:"
 echo "   1. ✅ Read structured data from external PostgreSQL"
 echo "   2. ✅ Decrypted sensitive fields using existing decrypt helper"
-echo "   3. ✅ Reconstructed WireGuard config files with all peers"
-echo "   4. ✅ Started WireGuard interfaces"
-echo "   5. ✅ Started Docker services with improved sync service"
-echo "   6. ✅ Triggered sync to ensure wgrest API consistency"
+echo "   3. ✅ Reconstructed clean WireGuard config files (no PostUp/PostDown)"
+echo "   4. ✅ Ensured persistent firewall rules are in place"
+echo "   5. ✅ Started WireGuard interfaces"
+echo "   6. ✅ Started Docker services with improved sync service"
+echo "   7. ✅ Triggered sync to ensure wgrest API consistency"
 echo ""
 echo "📊 Restoration Summary:"
 echo "   Database wg0 peers: $DB_WG0_PEERS"
@@ -343,6 +414,13 @@ echo "   WG1: ${WG1_FINAL_ADDRESS:-$WG1_ADDRESS} on port ${WG1_FINAL_PORT:-$WG1_
 echo "   FreeRADIUS: ports $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
 echo "   Target Website: $TARGET_WEBSITE_IP"
 echo ""
+echo "🔥 Firewall Benefits:"
+echo "   ✅ Persistent rules (survive reboots)"
+echo "   ✅ No duplicates created on restore"
+echo "   ✅ Clean WireGuard configs"
+echo "   ✅ Automatic rule management"
+echo ""
 echo "🧪 Verify with:"
 echo "   curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/v1/devices/"
-echo "   python3 verify_peer_sync.py"
+echo "   sudo iptables -L INPUT -n | grep -E '(51820|51821)'"
+echo "   sudo netfilter-persistent reload  # Test persistence"

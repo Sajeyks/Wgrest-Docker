@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🔄 WireGuard Database Restoration (No Duplicate Rules)"
+echo "🔄 WireGuard Database Restoration (YunoHost Compatible)"
 echo ""
 echo "⚠️  This will restore WireGuard from external PostgreSQL database"
 echo "   Make sure your database is restored first!"
@@ -94,13 +94,51 @@ pip3 install -q psycopg2-binary cryptography python-dotenv 2>/dev/null || {
     echo "⚠️  Could not install Python dependencies, trying without..."
 }
 
-# Ensure iptables-persistent is installed
-echo "📦 Ensuring iptables-persistent is available..."
-if ! dpkg -l | grep -q iptables-persistent; then
-    echo "   Installing iptables-persistent..."
-    sudo apt-get update
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
-    echo "✅ iptables-persistent installed"
+# Setup manual iptables persistence (YunoHost compatible)
+echo "📦 Ensuring manual iptables persistence is configured..."
+
+# Create iptables save/restore directory if it doesn't exist
+sudo mkdir -p /etc/iptables
+
+# Function to save iptables rules manually
+save_iptables_rules() {
+    echo "💾 Saving iptables rules manually..."
+    sudo iptables-save > /etc/iptables/rules.v4
+    sudo ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    echo "✅ Rules saved to /etc/iptables/rules.v4"
+}
+
+# Function to restore iptables rules manually  
+restore_iptables_rules() {
+    if [ -f /etc/iptables/rules.v4 ]; then
+        sudo iptables-restore < /etc/iptables/rules.v4
+        echo "✅ Rules restored from /etc/iptables/rules.v4"
+    fi
+}
+
+# Ensure systemd service exists for rule restoration on boot
+if [ ! -f /etc/systemd/system/iptables-restore-wireguard.service ]; then
+    echo "🔧 Creating systemd service for iptables persistence..."
+    sudo tee /etc/systemd/system/iptables-restore-wireguard.service > /dev/null << 'EOF'
+[Unit]
+Description=Restore WireGuard iptables rules
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'if [ -f /etc/iptables/rules.v4 ]; then /sbin/iptables-restore < /etc/iptables/rules.v4; fi'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Enable the service
+    sudo systemctl enable iptables-restore-wireguard.service
+    echo "✅ Manual iptables persistence service created and enabled"
+else
+    echo "✅ Manual iptables persistence already configured"
 fi
 
 # Function to add iptables rule only if it doesn't exist
@@ -257,10 +295,8 @@ if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
 fi
 sudo sysctl -p
 
-# Save all iptables rules persistently
-echo "💾 Saving iptables rules persistently..."
-sudo netfilter-persistent save
-echo "✅ All firewall rules saved and will persist across reboots"
+# Save all iptables rules manually (YunoHost compatible)
+save_iptables_rules
 
 # Start WireGuard interfaces manually (before Docker services)
 echo "🚀 Starting WireGuard interfaces..."
@@ -391,7 +427,7 @@ echo "   NAT rules:"
 sudo iptables -t nat -L POSTROUTING -n | grep -E "($WG0_SUBNET|$WG1_SUBNET)" | head -2
 
 echo ""
-echo "✅ Database restoration completed with persistent firewall rules!"
+echo "✅ Database restoration completed with YunoHost-compatible persistence!"
 echo ""
 echo "🔄 The restoration process:"
 echo "   1. ✅ Read structured data from external PostgreSQL"
@@ -414,13 +450,17 @@ echo "   WG1: ${WG1_FINAL_ADDRESS:-$WG1_ADDRESS} on port ${WG1_FINAL_PORT:-$WG1_
 echo "   FreeRADIUS: ports $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
 echo "   Target Website: $TARGET_WEBSITE_IP"
 echo ""
-echo "🔥 Firewall Benefits:"
-echo "   ✅ Persistent rules (survive reboots)"
+echo "🔥 YunoHost-Compatible Persistence:"
+echo "   ✅ Manual rule management (no package conflicts)"
+echo "   ✅ Rules saved to /etc/iptables/rules.v4"
+echo "   ✅ Systemd service for boot restoration"
 echo "   ✅ No duplicates created on restore"
-echo "   ✅ Clean WireGuard configs"
-echo "   ✅ Automatic rule management"
+echo ""
+echo "💾 Manual Persistence Commands:"
+echo "   Save: sudo iptables-save > /etc/iptables/rules.v4"
+echo "   Restore: sudo iptables-restore < /etc/iptables/rules.v4"
+echo "   Service: sudo systemctl status iptables-restore-wireguard"
 echo ""
 echo "🧪 Verify with:"
 echo "   curl -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WGREST_PORT/v1/devices/"
 echo "   sudo iptables -L INPUT -n | grep -E '(51820|51821)'"
-echo "   sudo netfilter-persistent reload  # Test persistence"

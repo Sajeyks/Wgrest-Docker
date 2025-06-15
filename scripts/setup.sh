@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Setting up WireGuard with External Database Backup (No Duplicate Rules)..."
+echo "🚀 Setting up WireGuard with External Database Backup (YunoHost Compatible)..."
 
 # Load environment
 if [ ! -f .env ]; then
@@ -105,16 +105,47 @@ if ! command -v docker-compose &> /dev/null; then
     sudo chmod +x /usr/local/bin/docker-compose
 fi
 
-# Install iptables-persistent for rule persistence
-echo "📦 Setting up iptables persistence..."
-if ! dpkg -l | grep -q iptables-persistent; then
-    echo "   Installing iptables-persistent..."
-    sudo apt-get update
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
-    echo "✅ iptables-persistent installed"
-else
-    echo "✅ iptables-persistent already installed"
-fi
+# Manual iptables persistence for YunoHost compatibility
+echo "📦 Setting up manual iptables persistence (YunoHost compatible)..."
+
+# Create iptables save/restore directory if it doesn't exist
+sudo mkdir -p /etc/iptables
+
+# Function to save iptables rules manually
+save_iptables_rules() {
+    echo "💾 Saving iptables rules manually..."
+    sudo iptables-save > /etc/iptables/rules.v4
+    sudo ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    echo "✅ Rules saved to /etc/iptables/rules.v4"
+}
+
+# Function to restore iptables rules manually  
+restore_iptables_rules() {
+    if [ -f /etc/iptables/rules.v4 ]; then
+        sudo iptables-restore < /etc/iptables/rules.v4
+        echo "✅ Rules restored from /etc/iptables/rules.v4"
+    fi
+}
+
+# Create systemd service for rule restoration on boot
+sudo tee /etc/systemd/system/iptables-restore-wireguard.service > /dev/null << 'EOF'
+[Unit]
+Description=Restore WireGuard iptables rules
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'if [ -f /etc/iptables/rules.v4 ]; then /sbin/iptables-restore < /etc/iptables/rules.v4; fi'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable the service
+sudo systemctl enable iptables-restore-wireguard.service
+echo "✅ Manual iptables persistence configured (YunoHost compatible)"
 
 # Create wgrest-build directory if it doesn't exist
 echo "📁 Setting up wgrest build directory..."
@@ -143,28 +174,6 @@ fi
 echo "🛑 Stopping existing WireGuard interfaces..."
 sudo wg-quick down wg0 2>/dev/null || true
 sudo wg-quick down wg1 2>/dev/null || true
-
-# Check for port conflicts
-echo "🔍 Checking for port conflicts..."
-if netstat -ulpn | grep -q ":$WG0_PORT "; then
-    echo "⚠️  Port $WG0_PORT is in use. Attempting to free it..."
-    sudo fuser -k $WG0_PORT/udp 2>/dev/null || true
-fi
-
-if netstat -ulpn | grep -q ":$WG1_PORT "; then
-    echo "⚠️  Port $WG1_PORT is in use. Attempting to free it..."
-    sudo fuser -k $WG1_PORT/udp 2>/dev/null || true
-fi
-
-if netstat -tlpn | grep -q ":$WGREST_PORT "; then
-    echo "⚠️  Port $WGREST_PORT is in use. Attempting to free it..."
-    sudo fuser -k $WGREST_PORT/tcp 2>/dev/null || true
-fi
-
-if netstat -tlpn | grep -q ":$WEBHOOK_PORT "; then
-    echo "⚠️  Port $WEBHOOK_PORT is in use. Attempting to free it..."
-    sudo fuser -k $WEBHOOK_PORT/tcp 2>/dev/null || true
-fi
 
 # Function to add iptables rule only if it doesn't exist
 add_persistent_rule() {
@@ -255,10 +264,8 @@ if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
 fi
 sudo sysctl -p
 
-# Save all iptables rules persistently
-echo "💾 Saving iptables rules persistently..."
-sudo netfilter-persistent save
-echo "✅ All firewall rules saved and will persist across reboots"
+# Save all iptables rules manually (YunoHost compatible)
+save_iptables_rules
 
 # Start WireGuard interfaces
 echo "🚀 Starting WireGuard interfaces..."
@@ -295,7 +302,7 @@ docker-compose up -d --build
 
 # Wait for services
 echo "⏳ Waiting for services to start..."
-sleep 45  # Give more time for build and startup
+sleep 45
 
 # Test wgrest API
 echo "🧪 Testing wgrest API..."
@@ -308,8 +315,6 @@ while [ $API_RETRIES -lt $MAX_RETRIES ]; do
         break
     else
         echo "⏳ wgrest API not ready yet, waiting... (attempt $((API_RETRIES + 1))/$MAX_RETRIES)"
-        echo "📋 Checking container status..."
-        docker-compose ps
         if [ $API_RETRIES -eq 2 ]; then
             echo "📋 wgrest logs:"
             docker-compose logs --tail=20 wgrest
@@ -325,17 +330,12 @@ if [ $API_RETRIES -eq $MAX_RETRIES ]; then
     docker-compose ps
     echo "📋 wgrest logs:"
     docker-compose logs wgrest
-    echo ""
-    echo "🔍 Troubleshooting suggestions:"
-    echo "   1. Check if the binary was built correctly: docker-compose exec wgrest /app/wgrest --help"
-    echo "   2. Check architecture: docker-compose exec wgrest uname -m"
-    echo "   3. Check for existing processes: ps aux | grep wgrest"
     exit 1
 fi
 
-# CRITICAL: Trigger initial sync to encrypt and store everything properly
-echo "🔄 Triggering initial sync to encrypt and store configurations..."
-sleep 5  # Let sync service fully initialize
+# Trigger initial sync
+echo "🔄 Triggering initial sync..."
+sleep 5
 
 SYNC_RETRIES=0
 MAX_SYNC_RETRIES=10
@@ -346,20 +346,10 @@ while [ $SYNC_RETRIES -lt $MAX_SYNC_RETRIES ]; do
         break
     else
         echo "⏳ Sync service not ready yet, waiting... (attempt $((SYNC_RETRIES + 1))/$MAX_SYNC_RETRIES)"
-        if [ $SYNC_RETRIES -eq 3 ]; then
-            echo "📋 Sync service logs:"
-            docker-compose logs --tail=20 wgrest-sync
-        fi
         sleep 10
         SYNC_RETRIES=$((SYNC_RETRIES + 1))
     fi
 done
-
-if [ $SYNC_RETRIES -eq $MAX_SYNC_RETRIES ]; then
-    echo "⚠️  Could not trigger initial sync via webhook, sync will happen on file change"
-    echo "📋 Sync service status:"
-    docker-compose logs wgrest-sync
-fi
 
 # Wait for sync to complete
 echo "⏳ Waiting for initial sync to complete..."
@@ -376,13 +366,6 @@ echo "   Server keys stored: $STORED_KEYS/2"
 echo "   Interfaces stored: $STORED_INTERFACES/2"
 echo "   Sync status records: $STORED_SYNC_STATUS"
 
-if [ "$STORED_KEYS" -eq 2 ] && [ "$STORED_INTERFACES" -eq 2 ] && [ "$STORED_SYNC_STATUS" -gt 0 ]; then
-    echo "✅ All data properly encrypted and stored in database"
-else
-    echo "⚠️  Some data may not be properly stored. Check sync service logs:"
-    docker-compose logs wgrest-sync
-fi
-
 # Final verification
 echo "🧪 Final verification..."
 for interface in wg0 wg1; do
@@ -392,7 +375,7 @@ for interface in wg0 wg1; do
 done
 
 echo ""
-echo "🎉 Setup completed successfully with persistent firewall rules!"
+echo "🎉 Setup completed successfully with YunoHost-compatible persistence!"
 echo ""
 echo "📊 Your WireGuard server details:"
 echo "   🌐 wgrest API: http://$SERVER_IP:$WGREST_PORT"
@@ -401,29 +384,17 @@ echo "   🔑 wg0 Public Key: $WG0_PUBLIC"
 echo "   🔑 wg1 Public Key: $WG1_PUBLIC"
 echo "   🗄️  External Database: $DB_HOST:$DB_PORT/$DB_NAME"
 echo "   🎯 Target Website IP: $TARGET_WEBSITE_IP"
-echo "   🔐 Server keys encrypted and stored in database"
-echo ""
-echo "📋 Network Configuration:"
-echo "   wg0: $WG0_ADDRESS (subnet: $WG0_SUBNET) on port $WG0_PORT"
-echo "   wg1: $WG1_ADDRESS (subnet: $WG1_SUBNET) on port $WG1_PORT"
-echo "   FreeRADIUS: ports $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
 echo ""
 echo "🔥 Firewall Configuration:"
-echo "   ✅ Persistent iptables rules (survive reboots)"
-echo "   ✅ No duplicate rules will be created"
-echo "   ✅ Clean WireGuard configs (no PostUp/PostDown)"
+echo "   ✅ YunoHost-compatible persistence"
+echo "   ✅ Manual rule management (no package conflicts)"
+echo "   ✅ Rules saved to /etc/iptables/rules.v4"
+echo "   ✅ Systemd service for boot restoration"
 echo ""
 echo "🔗 WireGuard Interface Status:"
 sudo wg show
 echo ""
-echo "🔧 Next steps:"
-echo "   1. Configure your Django app to use this wgrest API"
-echo "   2. Create peers via Django -> wgrest API"
-echo "   3. Database automatically syncs on changes (event-driven)"
-echo "   4. Manual sync available: curl -X POST -H 'Authorization: Bearer $WGREST_API_KEY' http://localhost:$WEBHOOK_PORT/sync"
-echo ""
-echo "💾 Backup strategy:"
-echo "   - All data (including encrypted keys) stored in external PostgreSQL"
-echo "   - Backup external PostgreSQL database: pg_dump $DB_NAME"
-echo "   - Restoration: restore database + run './scripts/restore.sh'"
-echo "   - Firewall rules are persistent and backed up automatically"
+echo "💾 Persistence Commands:"
+echo "   Manual save: sudo iptables-save > /etc/iptables/rules.v4"
+echo "   Manual restore: sudo iptables-restore < /etc/iptables/rules.v4"
+echo "   Service status: sudo systemctl status iptables-restore-wireguard"

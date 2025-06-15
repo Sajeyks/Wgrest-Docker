@@ -40,13 +40,13 @@ class SyncConfig:
         
         # WG0 Configuration
         self.wg0_port = os.getenv('WG0_PORT', '51820')
-        self.wg0_subnet = os.getenv('WG0_SUBNET', '10.10.0.0/8')
-        self.wg0_address = os.getenv('WG0_ADDRESS', '10.10.0.1/8')
+        self.wg0_subnet = os.getenv('WG0_SUBNET', '10.10.0.0/16')
+        self.wg0_address = os.getenv('WG0_ADDRESS', '10.10.0.1/16')
         
         # WG1 Configuration
         self.wg1_port = os.getenv('WG1_PORT', '51821')
-        self.wg1_subnet = os.getenv('WG1_SUBNET', '10.11.0.0/8')
-        self.wg1_address = os.getenv('WG1_ADDRESS', '10.11.0.1/8')
+        self.wg1_subnet = os.getenv('WG1_SUBNET', '10.11.0.0/16')
+        self.wg1_address = os.getenv('WG1_ADDRESS', '10.11.0.1/16')
         
         # FreeRADIUS Configuration
         self.radius_auth_port = os.getenv('RADIUS_AUTH_PORT', '1812')

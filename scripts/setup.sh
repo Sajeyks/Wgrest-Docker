@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Setting up WireGuard with Django Local Privileges Architecture..."
+echo "🚀 Setting up WireGuard with Enhanced Multi-Tenant Security..."
 
 # Load environment
 if [ ! -f .env ]; then
@@ -44,14 +44,14 @@ RADIUS_AUTH_PORT=${RADIUS_AUTH_PORT:-"1812"}
 RADIUS_ACCT_PORT=${RADIUS_ACCT_PORT:-"1813"}
 WEBHOOK_PORT=${WEBHOOK_PORT:-"8090"}
 
-echo "📋 Django Local Privileges Configuration:"
+echo "📋 Enhanced Multi-Tenant Security Configuration:"
 echo "   Server IP: $SERVER_IP"
 echo "   WG0 (MikroTik↔FreeRADIUS): $WG0_ADDRESS on port $WG0_PORT (subnet: $WG0_SUBNET)"
 echo "   WG1 (Django↔MikroTik): $WG1_ADDRESS on port $WG1_PORT (subnet: $WG1_SUBNET)"
 echo "   wgrest Port: $WGREST_PORT"
 echo "   Webhook Port: $WEBHOOK_PORT"
 echo "   FreeRADIUS Ports: $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
-echo "   Django: Local privileges (no peer config needed)"
+echo "   Django: Local with API-only access (tenant isolation enforced)"
 echo ""
 
 # Test external database connection
@@ -225,37 +225,81 @@ EOF
 # Set permissions
 sudo chmod 600 /etc/wireguard/wg*.conf
 
-# Setup correct firewall rules for Django Local Privileges architecture
-echo "🔥 Setting up firewall rules for Django Local Privileges..."
+# Setup enhanced multi-tenant security firewall rules
+echo "🔥 Setting up enhanced multi-tenant security rules..."
 
-# INPUT rules for WireGuard ports and services (keep existing - these are correct)
+# INPUT rules for WireGuard ports and services
 add_persistent_rule "filter" "INPUT" "-p udp --dport $WG0_PORT -j ACCEPT" "WG0 UDP (MikroTik connections)"
 add_persistent_rule "filter" "INPUT" "-p udp --dport $WG1_PORT -j ACCEPT" "WG1 UDP (Django connections)"
 add_persistent_rule "filter" "INPUT" "-p tcp --dport $WGREST_PORT -j ACCEPT" "wgrest API"
 add_persistent_rule "filter" "INPUT" "-p tcp --dport $WEBHOOK_PORT -j ACCEPT" "webhook"
 
-# FORWARD rules for WG0: MikroTik ↔ FreeRADIUS (bidirectional)
-echo "🔀 Setting up WG0 FORWARD rules (MikroTik ↔ FreeRADIUS)..."
+# =================
+# WG0 TENANT ISOLATION (MikroTik ↔ FreeRADIUS)
+# =================
+
+echo "🔀 Setting up WG0 rules with tenant isolation (MikroTik ↔ FreeRADIUS)..."
+
+# Allow MikroTik → FreeRADIUS (auth/accounting only)
 add_persistent_rule "filter" "FORWARD" "-i wg0 -d 127.0.0.1 -p udp --dport $RADIUS_AUTH_PORT -j ACCEPT" "MikroTik → FreeRADIUS auth"
 add_persistent_rule "filter" "FORWARD" "-i wg0 -d 127.0.0.1 -p udp --dport $RADIUS_ACCT_PORT -j ACCEPT" "MikroTik → FreeRADIUS acct"
+
+# Allow FreeRADIUS → MikroTik responses
 add_persistent_rule "filter" "FORWARD" "-o wg0 -s 127.0.0.1 -p udp --sport $RADIUS_AUTH_PORT -j ACCEPT" "FreeRADIUS auth → MikroTik"
 add_persistent_rule "filter" "FORWARD" "-o wg0 -s 127.0.0.1 -p udp --sport $RADIUS_ACCT_PORT -j ACCEPT" "FreeRADIUS acct → MikroTik"
 
-# FORWARD rules for WG1: Django (localhost) ↔ MikroTik (bidirectional)
-echo "🔀 Setting up WG1 FORWARD rules (Django local ↔ MikroTik)..."
-add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -j ACCEPT" "Django (local) → MikroTik"
-add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -j ACCEPT" "MikroTik → Django (local)"
+# CRITICAL: Block MikroTik-to-MikroTik communication on WG0
+add_persistent_rule "filter" "FORWARD" "-i wg0 -o wg0 -j DROP" "WG0: Block peer-to-peer communication"
 
-# Block general internet access for security
-echo "🔒 Blocking general internet access..."
-add_persistent_rule "filter" "FORWARD" "-i wg0 ! -d 127.0.0.1 -j DROP" "Block WG0 internet access"
-add_persistent_rule "filter" "FORWARD" "-i wg1 ! -d 127.0.0.1 -j DROP" "Block WG1 internet access"
+# Block WG0 → internet access
+add_persistent_rule "filter" "FORWARD" "-i wg0 ! -d 127.0.0.1 -j DROP" "WG0: Block internet access"
 
-# NAT rules: Minimal masquerading for required services only
-echo "🎭 Setting up minimal NAT rules..."
+# =================
+# WG1 ENHANCED TENANT ISOLATION (Django ↔ MikroTik API)
+# =================
+
+echo "🔀 Setting up WG1 rules with enhanced tenant isolation (Django ↔ MikroTik API)..."
+
+# Allow Django (local) → ANY MikroTik API (specific ports only)
+add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -p tcp --dport 8728 -j ACCEPT" "Django → MikroTik API"
+add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -p tcp --dport 8729 -j ACCEPT" "Django → MikroTik API SSL"
+add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -p tcp --dport 22 -j ACCEPT" "Django → MikroTik SSH"
+
+# Allow MikroTik API responses → Django
+add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -p tcp --sport 8728 -j ACCEPT" "MikroTik API → Django"
+add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -p tcp --sport 8729 -j ACCEPT" "MikroTik API SSL → Django"
+add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -p tcp --sport 22 -j ACCEPT" "MikroTik SSH → Django"
+
+# CRITICAL: Block MikroTik-to-MikroTik communication on WG1  
+add_persistent_rule "filter" "FORWARD" "-i wg1 -o wg1 -j DROP" "WG1: Block peer-to-peer communication"
+
+# Block any other WG1 traffic
+add_persistent_rule "filter" "FORWARD" "-i wg1 ! -d 127.0.0.1 -j DROP" "WG1: Block unauthorized traffic"
+
+# =================
+# CROSS-INTERFACE ISOLATION
+# =================
+
+echo "🚫 Setting up cross-interface isolation..."
+
+# Prevent WG0 → WG1 communication
+add_persistent_rule "filter" "FORWARD" "-i wg0 -o wg1 -j DROP" "Block WG0 → WG1"
+add_persistent_rule "filter" "FORWARD" "-i wg1 -o wg0 -j DROP" "Block WG1 → WG0"
+
+# =================
+# MINIMAL NAT RULES (Service-Specific)
+# =================
+
+echo "🎭 Setting up minimal service-specific NAT rules..."
+
+# WG0 NAT for FreeRADIUS communication only
 add_persistent_rule "nat" "POSTROUTING" "-s 10.10.0.0/16 -d 127.0.0.1 -p udp --dport $RADIUS_AUTH_PORT -j MASQUERADE" "WG0 → FreeRADIUS auth NAT"
 add_persistent_rule "nat" "POSTROUTING" "-s 10.10.0.0/16 -d 127.0.0.1 -p udp --dport $RADIUS_ACCT_PORT -j MASQUERADE" "WG0 → FreeRADIUS acct NAT"
-add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -j MASQUERADE" "Django (local) → MikroTik NAT"
+
+# WG1 NAT for Django API communication only
+add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -p tcp --dport 8728 -j MASQUERADE" "Django → MikroTik API NAT"
+add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -p tcp --dport 8729 -j MASQUERADE" "Django → MikroTik API SSL NAT"
+add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -p tcp --dport 22 -j MASQUERADE" "Django → MikroTik SSH NAT"
 
 # Enable IP forwarding
 echo "🔀 Enabling IP forwarding..."
@@ -375,7 +419,7 @@ for interface in wg0 wg1; do
 done
 
 echo ""
-echo "🎉 Setup completed successfully with Django Local Privileges architecture!"
+echo "✅ Setup completed successfully with Enhanced Multi-Tenant Security!"
 echo ""
 echo "📊 Your WireGuard server details:"
 echo "   🌐 wgrest API: http://$SERVER_IP:$WGREST_PORT"
@@ -384,20 +428,33 @@ echo "   🔑 wg0 Public Key: $WG0_PUBLIC"
 echo "   🔑 wg1 Public Key: $WG1_PUBLIC"
 echo "   🗄️  External Database: $DB_HOST:$DB_PORT/$DB_NAME"
 echo ""
-echo "🏗️ Architecture Summary:"
+echo "🏗️ Enhanced Multi-Tenant Architecture:"
 echo "   📱 WG0: MikroTik routers ↔ FreeRADIUS ($WG0_SUBNET)"
 echo "   💻 WG1: Django (local) ↔ MikroTik routers ($WG1_SUBNET)"
-echo "   🔒 Security: No general internet access allowed"
-echo "   🏠 Django: Local privileges (direct interface access)"
+echo "   🔒 Tenant Isolation: ENFORCED (no peer-to-peer communication)"
+echo "   🚫 Internet Access: BLOCKED (no VPN repurposing)"
+echo "   🎯 API Access: Django → MikroTik API ports only"
 echo ""
 echo "🔗 WireGuard Interface Status:"
 sudo wg show
 echo ""
-echo "🚀 Next steps:"
-echo "   1. Configure Django to communicate with MikroTik via wg1 interface"
-echo "   2. Create MikroTik peer configs for both wg0 and wg1"
-echo "   3. Test MikroTik ↔ FreeRADIUS authentication"
-echo "   4. Test Django ↔ MikroTik API communication"
+echo "🔒 Security Features Applied:"
+echo "   ✅ WG0: MikroTik peers CANNOT communicate with each other"
+echo "   ✅ WG1: MikroTik peers CANNOT communicate with each other"  
+echo "   ✅ WG0 ↔ WG1: Cross-interface communication BLOCKED"
+echo "   ✅ Internet access: BLOCKED for all VPN peers"
+echo "   ✅ Django: Can ONLY access MikroTik API ports (8728, 8729, 22)"
+echo "   ✅ FreeRADIUS: Can communicate with ANY MikroTik on wg0"
 echo ""
-echo "📋 Migration ready:"
-echo "   When Django moves remote, run migration guide in migration-guide.md"
+echo "🚀 Next steps:"
+echo "   1. Create MikroTik peer configs for both wg0 and wg1"
+echo "   2. Test MikroTik ↔ FreeRADIUS authentication"
+echo "   3. Test Django ↔ MikroTik API communication (specific ports only)"
+echo "   4. Verify tenant isolation with security testing script"
+echo ""
+echo "📋 Security Testing:"
+echo "   Run: ./scripts/test_security.sh (verify tenant isolation)"
+echo ""
+echo "📋 Migration Ready:"
+echo "   When Django moves remote: follow migration-guide.md"
+echo "   Use: ./scripts/migrate_django_remote.sh"

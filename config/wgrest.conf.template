@@ -1,13 +1,5 @@
-listen = "0.0.0.0:${WGREST_PORT}"
-api_key = "${WGREST_API_KEY}"
-data_dir = "/app/data"
+[server]
+listen = ["127.0.0.1:8080", "10.11.0.1:8080"]
 
-[interfaces.wg0]
-config_path = "/etc/wireguard/wg0.conf"
-subnet = "${WG0_SUBNET}"
-endpoint = "${SERVER_IP}:${WG0_PORT}"
-
-[interfaces.wg1]
-config_path = "/etc/wireguard/wg1.conf"
-subnet = "${WG1_SUBNET}"
-endpoint = "${SERVER_IP}:${WG1_PORT}"
+[logging]
+level = "info"

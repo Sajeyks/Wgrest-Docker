@@ -1,460 +1,197 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Setting up WireGuard with Enhanced Multi-Tenant Security..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Load environment
-if [ ! -f .env ]; then
-    echo "❌ .env file not found. Please create it first."
-    exit 1
+if [ -f "$PROJECT_DIR/.env" ]; then
+    source "$PROJECT_DIR/.env"
 fi
 
-source .env
+WG0_PORT=${WG0_PORT:-51820}
+WG1_PORT=${WG1_PORT:-51821}
+WG0_ADDRESS=${WG0_ADDRESS:-10.10.0.1/16}
+WG1_ADDRESS=${WG1_ADDRESS:-10.11.0.1/16}
+WGREST_PORT=${WGREST_PORT:-8080}
+DJANGO_WG_IP=${DJANGO_WG_IP:-10.11.0.100/32}
 
-# Set PostgreSQL environment variables to avoid password prompts
-export PGHOST=$DB_HOST
-export PGPORT=$DB_PORT
-export PGUSER=$DB_USER
-export PGPASSWORD=$DB_PASSWORD
-export PGDATABASE=$DB_NAME
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2; exit 1; }
 
-# Validate required environment variables
-validate_env_var() {
-    local var_name=$1
-    local var_value=${!var_name}
-    if [ -z "$var_value" ]; then
-        echo "❌ $var_name not set in .env file"
-        echo "   Please add: $var_name=<value>"
-        exit 1
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        error "Please run as root"
     fi
 }
 
-# Validate all required variables
-validate_env_var "SERVER_IP"
-validate_env_var "WG0_PORT"
-validate_env_var "WG1_PORT"
-validate_env_var "WGREST_PORT"
-
-# Set defaults for subnet/address variables if not provided
-WG0_SUBNET=${WG0_SUBNET:-"10.10.0.0/16"}
-WG0_ADDRESS=${WG0_ADDRESS:-"10.10.0.1/16"}
-WG1_SUBNET=${WG1_SUBNET:-"10.11.0.0/16"}
-WG1_ADDRESS=${WG1_ADDRESS:-"10.11.0.1/16"}
-RADIUS_AUTH_PORT=${RADIUS_AUTH_PORT:-"1812"}
-RADIUS_ACCT_PORT=${RADIUS_ACCT_PORT:-"1813"}
-WEBHOOK_PORT=${WEBHOOK_PORT:-"8090"}
-
-echo "📋 Enhanced Multi-Tenant Security Configuration:"
-echo "   Server IP: $SERVER_IP"
-echo "   WG0 (MikroTik↔FreeRADIUS): $WG0_ADDRESS on port $WG0_PORT (subnet: $WG0_SUBNET)"
-echo "   WG1 (Django↔MikroTik): $WG1_ADDRESS on port $WG1_PORT (subnet: $WG1_SUBNET)"
-echo "   wgrest Port: $WGREST_PORT"
-echo "   Webhook Port: $WEBHOOK_PORT"
-echo "   FreeRADIUS Ports: $RADIUS_AUTH_PORT, $RADIUS_ACCT_PORT"
-echo "   Django: Local with API-only access (tenant isolation enforced)"
-echo ""
-
-# Test external database connection
-echo "🔍 Testing external database connection..."
-if ! psql -c "SELECT 1;" &>/dev/null; then
-    echo "❌ Cannot connect to external database"
-    echo "   Database: $DB_HOST:$DB_PORT/$DB_NAME"
-    echo "   User: $DB_USER"
-    exit 1
-fi
-
-echo "✅ External database connection successful"
-
-# Check if database schema exists
-TABLES_EXIST=$(psql -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN ('interfaces', 'peers', 'server_keys', 'sync_status');" | xargs)
-
-if [ "$TABLES_EXIST" -lt 4 ]; then
-    echo "🗄️  Setting up database schema..."
-    if ! psql -f sql/init.sql; then
-        echo "❌ Failed to create database schema"
-        exit 1
-    fi
-    echo "✅ Database schema created"
-else
-    echo "✅ Database schema already exists"
-fi
-
-# Install Docker if needed
-if ! command -v docker &> /dev/null; then
-    echo "🐳 Installing Docker..."
-    curl -fsSL https://get.docker.com -o get-docker.sh
-    sudo sh get-docker.sh
-    sudo usermod -aG docker $USER
-fi
-
-# Install Docker Compose if needed
-if ! command -v docker-compose &> /dev/null; then
-    echo "🐳 Installing Docker Compose..."
-    sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-fi
-
-# Manual iptables persistence for YunoHost compatibility
-echo "📦 Setting up manual iptables persistence (YunoHost compatible)..."
-
-# Create iptables save/restore directory if it doesn't exist
-sudo mkdir -p /etc/iptables
-
-# Function to save iptables rules manually
-save_iptables_rules() {
-    echo "💾 Saving iptables rules manually..."
-    sudo iptables-save > /etc/iptables/rules.v4
-    sudo ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
-    echo "✅ Rules saved to /etc/iptables/rules.v4"
+install_dependencies() {
+    log "Installing dependencies..."
+    apt-get update
+    apt-get install -y wireguard wireguard-tools docker.io docker-compose jq curl
+    systemctl enable docker
+    systemctl start docker
 }
 
-# Ensure systemd service exists for rule restoration on boot
-if [ ! -f /etc/systemd/system/iptables-restore-wireguard.service ]; then
-    echo "🔧 Creating systemd service for iptables persistence..."
-    sudo tee /etc/systemd/system/iptables-restore-wireguard.service > /dev/null << 'EOF'
-[Unit]
-Description=Restore WireGuard iptables rules
-Before=network-pre.target
-Wants=network-pre.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'if [ -f /etc/iptables/rules.v4 ]; then /sbin/iptables-restore < /etc/iptables/rules.v4; fi'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Enable the service
-    sudo systemctl enable iptables-restore-wireguard.service
-    echo "✅ Manual iptables persistence service created and enabled"
-else
-    echo "✅ Manual iptables persistence already configured"
-fi
-
-# Create wgrest-build directory if it doesn't exist
-echo "📁 Setting up wgrest build directory..."
-mkdir -p wgrest-build
-
-# Check for existing host installations that might conflict
-echo "🔍 Checking for existing WireGuard/wgrest installations..."
-if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
-    echo "⚠️  Stopping existing WireGuard wg0 service..."
-    sudo systemctl stop wg-quick@wg0
-    sudo systemctl disable wg-quick@wg0
-fi
-
-if systemctl is-active --quiet wg-quick@wg1 2>/dev/null; then
-    echo "⚠️  Stopping existing WireGuard wg1 service..."
-    sudo systemctl stop wg-quick@wg1
-    sudo systemctl disable wg-quick@wg1
-fi
-
-if pgrep -f "wgrest" > /dev/null; then
-    echo "⚠️  Stopping existing wgrest processes..."
-    sudo pkill -f "wgrest" || true
-fi
-
-# Stop any existing WireGuard interfaces to avoid port conflicts
-echo "🛑 Stopping existing WireGuard interfaces..."
-sudo wg-quick down wg0 2>/dev/null || true
-sudo wg-quick down wg1 2>/dev/null || true
-
-# Function to add iptables rule only if it doesn't exist
-add_persistent_rule() {
-    local table=${1:-filter}
-    local chain=$2
-    local rule=$3
-    local description=$4
+generate_server_keys() {
+    log "Generating WireGuard server keys..."
     
-    if [ "$table" = "nat" ]; then
-        if ! sudo iptables -t nat -C $chain $rule 2>/dev/null; then
-            sudo iptables -t nat -A $chain $rule
-            echo "✅ Added $description"
-        else
-            echo "ℹ️  $description already exists"
-        fi
-    else
-        if ! sudo iptables -C $chain $rule 2>/dev/null; then
-            sudo iptables -A $chain $rule
-            echo "✅ Added $description"
-        else
-            echo "ℹ️  $description already exists"
-        fi
+    mkdir -p /etc/wireguard
+    chmod 700 /etc/wireguard
+    
+    if [ ! -f /etc/wireguard/wg0.key ]; then
+        wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
+        chmod 600 /etc/wireguard/wg0.key
     fi
+    
+    if [ ! -f /etc/wireguard/wg1.key ]; then
+        wg genkey | tee /etc/wireguard/wg1.key | wg pubkey > /etc/wireguard/wg1.pub
+        chmod 600 /etc/wireguard/wg1.key
+    fi
+    
+    WG0_PRIVATE=$(cat /etc/wireguard/wg0.key)
+    WG0_PUBLIC=$(cat /etc/wireguard/wg0.pub)
+    WG1_PRIVATE=$(cat /etc/wireguard/wg1.key)
+    WG1_PUBLIC=$(cat /etc/wireguard/wg1.pub)
+    
+    log "WG0 Public Key: $WG0_PUBLIC"
+    log "WG1 Public Key: $WG1_PUBLIC"
 }
 
-# Generate WireGuard keys
-echo "🔑 Generating WireGuard keys..."
-WG0_PRIVATE=$(wg genkey)
-WG0_PUBLIC=$(echo $WG0_PRIVATE | wg pubkey)
-WG1_PRIVATE=$(wg genkey)
-WG1_PUBLIC=$(echo $WG1_PRIVATE | wg pubkey)
-
-echo "🔐 Keys will be encrypted and stored by sync service after configs are created"
-
-# Create initial WireGuard configurations (NO PostUp/PostDown - using persistent rules)
-echo "📝 Creating clean WireGuard configurations..."
-sudo mkdir -p /etc/wireguard
-
-# Backup existing configs if they exist
-if [ -f /etc/wireguard/wg0.conf ]; then
-    sudo cp /etc/wireguard/wg0.conf /etc/wireguard/wg0.conf.backup.$(date +%s)
-fi
-if [ -f /etc/wireguard/wg1.conf ]; then
-    sudo cp /etc/wireguard/wg1.conf /etc/wireguard/wg1.conf.backup.$(date +%s)
-fi
-
-# wg0 config (MikroTik ↔ FreeRADIUS)
-sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
+create_wg_configs() {
+    log "Creating WireGuard configs..."
+    
+    cat > /etc/wireguard/wg0.conf << EOF
 [Interface]
 PrivateKey = $WG0_PRIVATE
 Address = $WG0_ADDRESS
 ListenPort = $WG0_PORT
 EOF
-
-# wg1 config (Django ↔ MikroTik)
-sudo tee /etc/wireguard/wg1.conf > /dev/null << EOF
+    
+    cat > /etc/wireguard/wg1.conf << EOF
 [Interface]
 PrivateKey = $WG1_PRIVATE
 Address = $WG1_ADDRESS
 ListenPort = $WG1_PORT
 EOF
 
-# Set permissions
-sudo chmod 600 /etc/wireguard/wg*.conf
+    if [ -n "$DJANGO_WG_PUBLIC_KEY" ]; then
+        log "Adding Django peer to wg1..."
+        cat >> /etc/wireguard/wg1.conf << EOF
 
-# Setup enhanced multi-tenant security firewall rules
-echo "🔥 Setting up enhanced multi-tenant security rules..."
-
-# INPUT rules for WireGuard ports and services
-add_persistent_rule "filter" "INPUT" "-p udp --dport $WG0_PORT -j ACCEPT" "WG0 UDP (MikroTik connections)"
-add_persistent_rule "filter" "INPUT" "-p udp --dport $WG1_PORT -j ACCEPT" "WG1 UDP (Django connections)"
-add_persistent_rule "filter" "INPUT" "-p tcp --dport $WGREST_PORT -j ACCEPT" "wgrest API"
-add_persistent_rule "filter" "INPUT" "-p tcp --dport $WEBHOOK_PORT -j ACCEPT" "webhook"
-
-# =================
-# WG0 TENANT ISOLATION (MikroTik ↔ FreeRADIUS)
-# =================
-
-echo "🔀 Setting up WG0 rules with tenant isolation (MikroTik ↔ FreeRADIUS)..."
-
-# Allow MikroTik → FreeRADIUS (auth/accounting only)
-add_persistent_rule "filter" "FORWARD" "-i wg0 -d 127.0.0.1 -p udp --dport $RADIUS_AUTH_PORT -j ACCEPT" "MikroTik → FreeRADIUS auth"
-add_persistent_rule "filter" "FORWARD" "-i wg0 -d 127.0.0.1 -p udp --dport $RADIUS_ACCT_PORT -j ACCEPT" "MikroTik → FreeRADIUS acct"
-
-# Allow FreeRADIUS → MikroTik responses
-add_persistent_rule "filter" "FORWARD" "-o wg0 -s 127.0.0.1 -p udp --sport $RADIUS_AUTH_PORT -j ACCEPT" "FreeRADIUS auth → MikroTik"
-add_persistent_rule "filter" "FORWARD" "-o wg0 -s 127.0.0.1 -p udp --sport $RADIUS_ACCT_PORT -j ACCEPT" "FreeRADIUS acct → MikroTik"
-
-# CRITICAL: Block MikroTik-to-MikroTik communication on WG0
-add_persistent_rule "filter" "FORWARD" "-i wg0 -o wg0 -j DROP" "WG0: Block peer-to-peer communication"
-
-# Block WG0 → internet access
-add_persistent_rule "filter" "FORWARD" "-i wg0 ! -d 127.0.0.1 -j DROP" "WG0: Block internet access"
-
-# =================
-# WG1 ENHANCED TENANT ISOLATION (Django ↔ MikroTik API)
-# =================
-
-echo "🔀 Setting up WG1 rules with enhanced tenant isolation (Django ↔ MikroTik API)..."
-
-# Allow Django (local) → ANY MikroTik API (specific ports only)
-add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -p tcp --dport 8728 -j ACCEPT" "Django → MikroTik API"
-add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -p tcp --dport 8729 -j ACCEPT" "Django → MikroTik API SSL"
-add_persistent_rule "filter" "FORWARD" "-s 127.0.0.1 -o wg1 -p tcp --dport 22 -j ACCEPT" "Django → MikroTik SSH"
-
-# Allow MikroTik API responses → Django
-add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -p tcp --sport 8728 -j ACCEPT" "MikroTik API → Django"
-add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -p tcp --sport 8729 -j ACCEPT" "MikroTik API SSL → Django"
-add_persistent_rule "filter" "FORWARD" "-i wg1 -d 127.0.0.1 -p tcp --sport 22 -j ACCEPT" "MikroTik SSH → Django"
-
-# CRITICAL: Block MikroTik-to-MikroTik communication on WG1  
-add_persistent_rule "filter" "FORWARD" "-i wg1 -o wg1 -j DROP" "WG1: Block peer-to-peer communication"
-
-# Block any other WG1 traffic
-add_persistent_rule "filter" "FORWARD" "-i wg1 ! -d 127.0.0.1 -j DROP" "WG1: Block unauthorized traffic"
-
-# =================
-# CROSS-INTERFACE ISOLATION
-# =================
-
-echo "🚫 Setting up cross-interface isolation..."
-
-# Prevent WG0 → WG1 communication
-add_persistent_rule "filter" "FORWARD" "-i wg0 -o wg1 -j DROP" "Block WG0 → WG1"
-add_persistent_rule "filter" "FORWARD" "-i wg1 -o wg0 -j DROP" "Block WG1 → WG0"
-
-# =================
-# MINIMAL NAT RULES (Service-Specific)
-# =================
-
-echo "🎭 Setting up minimal service-specific NAT rules..."
-
-# WG0 NAT for FreeRADIUS communication only
-add_persistent_rule "nat" "POSTROUTING" "-s 10.10.0.0/16 -d 127.0.0.1 -p udp --dport $RADIUS_AUTH_PORT -j MASQUERADE" "WG0 → FreeRADIUS auth NAT"
-add_persistent_rule "nat" "POSTROUTING" "-s 10.10.0.0/16 -d 127.0.0.1 -p udp --dport $RADIUS_ACCT_PORT -j MASQUERADE" "WG0 → FreeRADIUS acct NAT"
-
-# WG1 NAT for Django API communication only
-add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -p tcp --dport 8728 -j MASQUERADE" "Django → MikroTik API NAT"
-add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -p tcp --dport 8729 -j MASQUERADE" "Django → MikroTik API SSL NAT"
-add_persistent_rule "nat" "POSTROUTING" "-s 127.0.0.1 -o wg1 -p tcp --dport 22 -j MASQUERADE" "Django → MikroTik SSH NAT"
-
-# Enable IP forwarding
-echo "🔀 Enabling IP forwarding..."
-if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-    echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
-fi
-sudo sysctl -p
-
-# Save all iptables rules manually (YunoHost compatible)
-save_iptables_rules
-
-# Start WireGuard interfaces
-echo "🚀 Starting WireGuard interfaces..."
-
-# Start wg0
-if sudo wg-quick up wg0; then
-    echo "✅ wg0 interface started successfully on $WG0_ADDRESS:$WG0_PORT"
-else
-    echo "❌ Failed to start wg0 interface"
-    exit 1
-fi
-
-# Start wg1
-if sudo wg-quick up wg1; then
-    echo "✅ wg1 interface started successfully on $WG1_ADDRESS:$WG1_PORT"
-else
-    echo "❌ Failed to start wg1 interface"
-    exit 1
-fi
-
-# Enable interfaces to start on boot
-echo "🔄 Enabling WireGuard interfaces to start on boot..."
-sudo systemctl enable wg-quick@wg0
-sudo systemctl enable wg-quick@wg1
-
-# Clean up any existing containers
-echo "🧹 Cleaning up existing containers..."
-docker-compose down 2>/dev/null || true
-
-# Build and start services
-echo "🔨 Building and starting Docker services..."
-echo "   This may take a few minutes as we build wgrest from source..."
-docker-compose up -d --build
-
-# Wait for services
-echo "⏳ Waiting for services to start..."
-sleep 45
-
-# Test wgrest API
-echo "🧪 Testing wgrest API..."
-API_RETRIES=0
-MAX_RETRIES=6
-
-while [ $API_RETRIES -lt $MAX_RETRIES ]; do
-    if curl -s -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WGREST_PORT/v1/devices/ >/dev/null; then
-        echo "✅ wgrest API is responding on port $WGREST_PORT"
-        break
+[Peer]
+PublicKey = $DJANGO_WG_PUBLIC_KEY
+AllowedIPs = $DJANGO_WG_IP
+EOF
     else
-        echo "⏳ wgrest API not ready yet, waiting... (attempt $((API_RETRIES + 1))/$MAX_RETRIES)"
-        if [ $API_RETRIES -eq 2 ]; then
-            echo "📋 wgrest logs:"
-            docker-compose logs --tail=20 wgrest
+        log "WARNING: DJANGO_WG_PUBLIC_KEY not set - Django peer not added"
+    fi
+    
+    chmod 600 /etc/wireguard/wg0.conf /etc/wireguard/wg1.conf
+}
+
+setup_firewall() {
+    log "Configuring firewall rules..."
+    
+    sysctl -w net.ipv4.ip_forward=1
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    
+    # WireGuard and wgrest ports
+    iptables -A INPUT -p udp --dport $WG0_PORT -j ACCEPT
+    iptables -A INPUT -p udp --dport $WG1_PORT -j ACCEPT
+    
+    # Peer isolation - no peer-to-peer traffic
+    iptables -A FORWARD -i wg0 -o wg0 -j DROP
+    iptables -A FORWARD -i wg1 -o wg1 -j DROP
+    iptables -A FORWARD -i wg0 -o wg1 -j DROP
+    iptables -A FORWARD -i wg1 -o wg0 -j DROP
+    
+    # wg0: MikroTik can only reach FreeRADIUS
+    iptables -A FORWARD -i wg0 -d 10.10.0.1 -p udp --dport 1812 -j ACCEPT
+    iptables -A FORWARD -i wg0 -d 10.10.0.1 -p udp --dport 1813 -j ACCEPT
+    iptables -A FORWARD -i wg0 -j DROP
+    
+    # wg1: Django can reach MikroTik routers
+    DJANGO_IP=$(echo $DJANGO_WG_IP | cut -d'/' -f1)
+    iptables -A FORWARD -i wg1 -s $DJANGO_IP -p tcp --dport 8728 -j ACCEPT
+    iptables -A FORWARD -i wg1 -s $DJANGO_IP -p tcp --dport 8729 -j ACCEPT
+    iptables -A FORWARD -i wg1 -s $DJANGO_IP -p tcp --dport 22 -j ACCEPT
+    iptables -A FORWARD -i wg1 -j DROP
+    
+    # Save rules
+    if command -v netfilter-persistent &> /dev/null; then
+        netfilter-persistent save
+    else
+        apt-get install -y iptables-persistent
+        netfilter-persistent save
+    fi
+}
+
+start_wireguard() {
+    log "Starting WireGuard interfaces..."
+    
+    wg-quick down wg0 2>/dev/null || true
+    wg-quick down wg1 2>/dev/null || true
+    
+    wg-quick up wg0
+    wg-quick up wg1
+    
+    systemctl enable wg-quick@wg0
+    systemctl enable wg-quick@wg1
+}
+
+start_docker() {
+    log "Starting Docker services..."
+    cd "$PROJECT_DIR"
+    docker-compose down 2>/dev/null || true
+    docker-compose up -d
+}
+
+wait_for_wgrest() {
+    log "Waiting for wgrest API..."
+    for i in {1..30}; do
+        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$WGREST_PORT/v1/devices/" | grep -q "200\|401"; then
+            log "wgrest API is ready"
+            return 0
         fi
-        sleep 10
-        API_RETRIES=$((API_RETRIES + 1))
-    fi
-done
+        sleep 1
+    done
+    error "wgrest API did not become ready"
+}
 
-if [ $API_RETRIES -eq $MAX_RETRIES ]; then
-    echo "❌ wgrest API is not responding after $MAX_RETRIES attempts"
-    echo "📋 Service status:"
-    docker-compose ps
-    echo "📋 wgrest logs:"
-    docker-compose logs wgrest
-    exit 1
-fi
-
-# Trigger initial sync
-echo "🔄 Triggering initial sync..."
-sleep 5
-
-SYNC_RETRIES=0
-MAX_SYNC_RETRIES=10
-
-while [ $SYNC_RETRIES -lt $MAX_SYNC_RETRIES ]; do
-    if curl -s -X POST -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:$WEBHOOK_PORT/sync | grep -q "sync_triggered"; then
-        echo "✅ Initial sync triggered successfully"
-        break
+print_summary() {
+    echo ""
+    echo "=========================================="
+    echo "Setup Complete"
+    echo "=========================================="
+    echo ""
+    echo "Server Public Keys (add to Django settings):"
+    echo "  WG0: $(cat /etc/wireguard/wg0.pub)"
+    echo "  WG1: $(cat /etc/wireguard/wg1.pub)"
+    echo ""
+    echo "Endpoints:"
+    echo "  WG0: ${SERVER_IP:-<SERVER_IP>}:$WG0_PORT"
+    echo "  WG1: ${SERVER_IP:-<SERVER_IP>}:$WG1_PORT"
+    echo "  wgrest API: http://localhost:$WGREST_PORT"
+    echo ""
+    if [ -z "$DJANGO_WG_PUBLIC_KEY" ]; then
+        echo "WARNING: Django peer not configured!"
+        echo "Set DJANGO_WG_PUBLIC_KEY in .env and re-run setup"
     else
-        echo "⏳ Sync service not ready yet, waiting... (attempt $((SYNC_RETRIES + 1))/$MAX_SYNC_RETRIES)"
-        sleep 10
-        SYNC_RETRIES=$((SYNC_RETRIES + 1))
+        echo "Django peer configured: $DJANGO_WG_IP"
     fi
-done
+    echo ""
+}
 
-# Wait for sync to complete
-echo "⏳ Waiting for initial sync to complete..."
-sleep 20
+main() {
+    check_root
+    install_dependencies
+    generate_server_keys
+    create_wg_configs
+    setup_firewall
+    start_wireguard
+    start_docker
+    wait_for_wgrest
+    print_summary
+}
 
-# Verify that encrypted data was stored
-echo "🔍 Verifying encrypted data storage..."
-STORED_KEYS=$(psql -t -c "SELECT COUNT(*) FROM server_keys WHERE private_key IS NOT NULL AND private_key != '';" | xargs)
-STORED_INTERFACES=$(psql -t -c "SELECT COUNT(*) FROM interfaces;" | xargs)
-STORED_SYNC_STATUS=$(psql -t -c "SELECT COUNT(*) FROM sync_status;" | xargs)
-
-echo "📊 Database verification:"
-echo "   Server keys stored: $STORED_KEYS/2"
-echo "   Interfaces stored: $STORED_INTERFACES/2"
-echo "   Sync status records: $STORED_SYNC_STATUS"
-
-# Final verification
-echo "🧪 Final verification..."
-for interface in wg0 wg1; do
-    PEER_COUNT=$(curl -s -H "Authorization: Bearer $WGREST_API_KEY" \
-                      "http://localhost:$WGREST_PORT/v1/devices/$interface/peers/" 2>/dev/null | jq length 2>/dev/null || echo "0")
-    echo "Interface $interface: $PEER_COUNT peers (expected: 0 for fresh install)"
-done
-
-echo ""
-echo "✅ Setup completed successfully with Enhanced Multi-Tenant Security!"
-echo ""
-echo "📊 Your WireGuard server details:"
-echo "   🌐 wgrest API: http://$SERVER_IP:$WGREST_PORT"
-echo "   🔑 API Key: $WGREST_API_KEY"
-echo "   🔑 wg0 Public Key: $WG0_PUBLIC"
-echo "   🔑 wg1 Public Key: $WG1_PUBLIC"
-echo "   🗄️  External Database: $DB_HOST:$DB_PORT/$DB_NAME"
-echo ""
-echo "🏗️ Enhanced Multi-Tenant Architecture:"
-echo "   📱 WG0: MikroTik routers ↔ FreeRADIUS ($WG0_SUBNET)"
-echo "   💻 WG1: Django (local) ↔ MikroTik routers ($WG1_SUBNET)"
-echo "   🔒 Tenant Isolation: ENFORCED (no peer-to-peer communication)"
-echo "   🚫 Internet Access: BLOCKED (no VPN repurposing)"
-echo "   🎯 API Access: Django → MikroTik API ports only"
-echo ""
-echo "🔗 WireGuard Interface Status:"
-sudo wg show
-echo ""
-echo "🔒 Security Features Applied:"
-echo "   ✅ WG0: MikroTik peers CANNOT communicate with each other"
-echo "   ✅ WG1: MikroTik peers CANNOT communicate with each other"  
-echo "   ✅ WG0 ↔ WG1: Cross-interface communication BLOCKED"
-echo "   ✅ Internet access: BLOCKED for all VPN peers"
-echo "   ✅ Django: Can ONLY access MikroTik API ports (8728, 8729, 22)"
-echo "   ✅ FreeRADIUS: Can communicate with ANY MikroTik on wg0"
-echo ""
-echo "🚀 Next steps:"
-echo "   1. Create MikroTik peer configs for both wg0 and wg1"
-echo "   2. Test MikroTik ↔ FreeRADIUS authentication"
-echo "   3. Test Django ↔ MikroTik API communication (specific ports only)"
-echo "   4. Verify tenant isolation with security testing script"
-echo ""
-echo "📋 Security Testing:"
-echo "   Run: ./scripts/test_security.sh (verify tenant isolation)"
-echo ""
-echo "📋 Migration Ready:"
-echo "   When Django moves remote: follow migration-guide.md"
-echo "   Use: ./scripts/migrate_django_remote.sh"
+main "$@"

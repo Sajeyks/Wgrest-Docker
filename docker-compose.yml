@@ -1,116 +1,29 @@
-version: '3.8'
-
 services:
-  # Standard wgrest (built from source using official structure)
   wgrest:
-    build:
-      context: ./wgrest-build
-      dockerfile: Dockerfile
+    image: ghcr.io/suquant/wgrest:latest
     container_name: wgrest
     restart: unless-stopped
     network_mode: host
     privileged: true
-    cap_add:
-      - ALL
-    security_opt:
-      - seccomp:unconfined
-    volumes:
-      - /etc/wireguard:/etc/wireguard
-      - ./config/wgrest.conf.template:/app/config.conf.template
-      - wgrest_data:/app/data
-      - /dev:/dev
-      - /sys:/sys
-      - /proc:/proc
-    environment:
-      - WGREST_PORT=${WGREST_PORT:-51800}
-      - WGREST_API_KEY=${WGREST_API_KEY}
-      - SERVER_IP=${SERVER_IP}
-      - WG0_PORT=${WG0_PORT:-51820}
-      - WG1_PORT=${WG1_PORT:-51821}
-      - WG0_SUBNET=${WG0_SUBNET:-10.10.0.0/16}
-      - WG1_SUBNET=${WG1_SUBNET:-10.11.0.0/16}
     depends_on:
       - wireguard
-    entrypoint: []
-    command: >
-      sh -c "
-      envsubst < /app/config.conf.template > /app/config.conf &&
-      echo 'Generated config:' &&
-      cat /app/config.conf &&
-      echo 'Running as:' && whoami &&
-      echo 'Checking WireGuard access...' &&
-      wg show || echo 'WireGuard not accessible yet' &&
-      /app/wgrest --conf /app/config.conf
-      "
+    volumes:
+      - /etc/wireguard:/etc/wireguard
+      - ./config/wgrest.toml:/etc/wgrest/config.toml:ro
+    environment:
+      - WG_DEVICE=wg0,wg1
+      - WGREST_LISTEN=127.0.0.1:8080,10.11.0.1:8080
+      - WGREST_AUTH_TOKEN=${WGREST_API_KEY}
 
-  # WireGuard container - loads kernel modules and stays running
   wireguard:
-    image: linuxserver/wireguard:latest
+    image: lscr.io/linuxserver/wireguard:latest
     container_name: wireguard
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
-    environment:
-      - PUID=0  # Run as root
-      - PGID=0  # Run as root group
-      - TZ=Africa/Nairobi
     volumes:
-      - /lib/modules:/lib/modules
-      - /dev/net/tun:/dev/net/tun
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv4.ip_forward=1
-    restart: unless-stopped
-    command: >
-      sh -c "
-      echo 'Loading WireGuard kernel module...' &&
-      modprobe wireguard &&
-      echo 'WireGuard kernel module loaded successfully' &&
-      echo 'Keeping container running for ongoing management...' &&
-      sleep infinity
-      "
-
-  # Sync service: wgrest → External PostgreSQL
-  wgrest-sync:
-    build: ./sync-service
-    container_name: wgrest-sync
-    restart: unless-stopped
-    ports:
-      - "${WEBHOOK_PORT:-8090}:${WEBHOOK_PORT:-8090}"  # Webhook endpoint
-    environment:
-      - WGREST_API_URL=http://localhost:${WGREST_PORT:-51800}
-      - WGREST_API_KEY=${WGREST_API_KEY}
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
-      # Event-driven sync configuration
-      - SYNC_MODE=event-driven
-      - SYNC_INTERVAL=300
-      - DEBOUNCE_SECONDS=5
-      # Webhook configuration
-      - WEBHOOK_ENABLED=true
-      - WEBHOOK_PORT=${WEBHOOK_PORT:-8090}
-      # Server config - use environment variables
-      - SERVER_IP=${SERVER_IP}
-      - WG0_PORT=${WG0_PORT:-51820}
-      - WG1_PORT=${WG1_PORT:-51821}
-      - WG0_SUBNET=${WG0_SUBNET:-10.10.0.0/16}
-      - WG1_SUBNET=${WG1_SUBNET:-10.11.0.0/16}
-      - WG0_ADDRESS=${WG0_ADDRESS:-10.10.0.1/16}
-      - WG1_ADDRESS=${WG1_ADDRESS:-10.11.0.1/16}
-      - RADIUS_AUTH_PORT=${RADIUS_AUTH_PORT:-1812}
-      - RADIUS_ACCT_PORT=${RADIUS_ACCT_PORT:-1813}
-      - TARGET_WEBSITE_IP=${TARGET_WEBSITE_IP}
-      # Encryption (optional)
-      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY:-}
-      # Cleanup configuration
-      - CLEANUP_ENABLED=true
-      - CLEANUP_OLDER_THAN_HOURS=72
-      - CLEANUP_TIME=02:00
-    volumes:
-      - /etc/wireguard:/etc/wireguard:ro
-      - wgrest_data:/app/wgrest_data:ro
-    depends_on:
-      - wgrest
-    network_mode: host
-
-volumes:
-  wgrest_data:
+      - /lib/modules:/lib/modules:ro
+    command: /bin/sh -c "modprobe wireguard && sleep infinity"

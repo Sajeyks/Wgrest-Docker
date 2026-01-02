@@ -1,5 +1,5 @@
 # Use Go 1.21 to support modern syntax (generics, etc.)
-FROM golang:1.21-alpine as build-env
+FROM golang:1.21-alpine AS build-env
 LABEL maintainer="ForestVPN.com <support@forestvpn.com>"
 
 RUN apk add --no-cache git gcc

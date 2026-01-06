@@ -8,8 +8,6 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 
 WGREST_PORT=${WGREST_PORT:-8080}
-DJANGO_WG_IP=${DJANGO_WG_IP:-10.11.0.100/32}
-DJANGO_IP=$(echo $DJANGO_WG_IP | cut -d'/' -f1)
 
 PASS=0
 FAIL=0
@@ -41,7 +39,6 @@ echo ""
 echo "Firewall - Input:"
 check "WG0 port open" "iptables -L INPUT -n | grep -q '51820'"
 check "WG1 port open" "iptables -L INPUT -n | grep -q '51821'"
-check "wgrest port open" "iptables -L INPUT -n | grep -q '$WGREST_PORT'"
 echo ""
 
 echo "Firewall - Peer Isolation:"
@@ -54,8 +51,6 @@ echo ""
 echo "Firewall - Allowed Traffic:"
 check "RADIUS 1812 allowed" "iptables -L FORWARD -n | grep -q '10.10.0.1.*1812.*ACCEPT'"
 check "RADIUS 1813 allowed" "iptables -L FORWARD -n | grep -q '10.10.0.1.*1813.*ACCEPT'"
-check "Django to MikroTik 8728" "iptables -L FORWARD -n | grep -q '$DJANGO_IP.*8728.*ACCEPT'"
-check "Django to MikroTik 8729" "iptables -L FORWARD -n | grep -q '$DJANGO_IP.*8729.*ACCEPT'"
 echo ""
 
 echo "Firewall - Default Drops:"

@@ -12,7 +12,7 @@ services:
       - ./config/wgrest.toml:/etc/wgrest/config.toml:ro
     environment:
       - WG_DEVICE=wg0,wg1
-      - WGREST_LISTEN=127.0.0.1:8080,10.11.0.1:8080
+      - WGREST_LISTEN=127.0.0.1:8080
       - WGREST_AUTH_TOKEN=${WGREST_API_KEY}
 
   wireguard:

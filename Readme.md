@@ -16,9 +16,8 @@ Single Server (WireGuard + Django/Coolify)
 
 ## Traffic Rules
 
-```text
 | From | To | Allowed |
-|------|----|---------|
+| ------ | ---- | --------- |
 | MikroTik (wg0) | FreeRADIUS (10.10.0.1:1812,1813) | ✓ |
 | MikroTik (wg0) | Other MikroTik | ✗ |
 | MikroTik (wg0) | Internet | ✗ |
@@ -28,7 +27,6 @@ Single Server (WireGuard + Django/Coolify)
 | Django (host) | MikroTik (10.11.0.X) | ✓ |
 
 ---
-```
 
 ## Setup
 

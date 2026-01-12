@@ -169,8 +169,8 @@ start_wireguard() {
 start_docker() {
     log "Starting Docker services..."
     cd "$PROJECT_DIR"
-    docker-compose down 2>/dev/null || true
-    docker-compose up -d
+    docker compose down 2>/dev/null || true
+    docker compose up -d
 }
 
 wait_for_wgrest() {

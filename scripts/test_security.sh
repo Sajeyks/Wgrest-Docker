@@ -12,8 +12,34 @@ WGREST_PORT=${WGREST_PORT:-8080}
 PASS=0
 FAIL=0
 
+# Dump iptables to temp file for reliable parsing
+TMPFILE=$(mktemp)
+iptables -L FORWARD -n -v > "$TMPFILE"
+INPUT_TMPFILE=$(mktemp)
+iptables -L INPUT -n -v > "$INPUT_TMPFILE"
+
 check() {
     if eval "$2" > /dev/null 2>&1; then
+        echo "✓ $1"
+        ((PASS++))
+    else
+        echo "✗ $1"
+        ((FAIL++))
+    fi
+}
+
+check_forward() {
+    if grep -E "$2" "$TMPFILE" > /dev/null 2>&1; then
+        echo "✓ $1"
+        ((PASS++))
+    else
+        echo "✗ $1"
+        ((FAIL++))
+    fi
+}
+
+check_input() {
+    if grep -E "$2" "$INPUT_TMPFILE" > /dev/null 2>&1; then
         echo "✓ $1"
         ((PASS++))
     else
@@ -37,26 +63,29 @@ check "Docker containers running" "docker ps | grep -q wgrest"
 echo ""
 
 echo "Firewall - Input:"
-check "WG0 port open" "iptables -L INPUT -n | grep -q '51820'"
-check "WG1 port open" "iptables -L INPUT -n | grep -q '51821'"
+check_input "WG0 port open" "dpt:51820"
+check_input "WG1 port open" "dpt:51821"
 echo ""
 
 echo "Firewall - Peer Isolation:"
-check "wg0-to-wg0 blocked" "iptables -L FORWARD -n | grep -q 'wg0.*wg0.*DROP'"
-check "wg1-to-wg1 blocked" "iptables -L FORWARD -n | grep -q 'wg1.*wg1.*DROP'"
-check "wg0-to-wg1 blocked" "iptables -L FORWARD -n | grep -q 'wg0.*wg1.*DROP'"
-check "wg1-to-wg0 blocked" "iptables -L FORWARD -n | grep -q 'wg1.*wg0.*DROP'"
+check_forward "wg0-to-wg0 blocked" "DROP.+wg0.+wg0"
+check_forward "wg1-to-wg1 blocked" "DROP.+wg1.+wg1"
+check_forward "wg0-to-wg1 blocked" "DROP.+wg0.+wg1"
+check_forward "wg1-to-wg0 blocked" "DROP.+wg1.+wg0"
 echo ""
 
 echo "Firewall - Allowed Traffic:"
-check "RADIUS 1812 allowed" "iptables -L FORWARD -n | grep -q '10.10.0.1.*1812.*ACCEPT'"
-check "RADIUS 1813 allowed" "iptables -L FORWARD -n | grep -q '10.10.0.1.*1813.*ACCEPT'"
+check_forward "RADIUS 1812 allowed" "ACCEPT.+10\.10\.0\.1.+dpt:1812"
+check_forward "RADIUS 1813 allowed" "ACCEPT.+10\.10\.0\.1.+dpt:1813"
 echo ""
 
 echo "Firewall - Default Drops:"
-check "wg0 default drop" "iptables -L FORWARD -n | grep 'wg0' | tail -1 | grep -q DROP"
-check "wg1 default drop" "iptables -L FORWARD -n | grep 'wg1' | tail -1 | grep -q DROP"
+check_forward "wg0 default drop" "DROP.+wg0 +\* +0\.0\.0\.0/0 +0\.0\.0\.0/0"
+check_forward "wg1 default drop" "DROP.+wg1 +\* +0\.0\.0\.0/0 +0\.0\.0\.0/0"
 echo ""
+
+# Cleanup
+rm -f "$TMPFILE" "$INPUT_TMPFILE"
 
 echo "========================"
 echo "Results: $PASS passed, $FAIL failed"

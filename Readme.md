@@ -61,8 +61,24 @@ DJANGO_API_TOKEN=
 
 ### Step 2: Run Setup
 
+Make the scripts executable:
+
+```bash
+chmod +x scripts/setup.sh
+chmod +x scripts/restore.sh
+chmod +x scripts/test_security.sh
+```
+
+Run the setup:
+
 ```bash
 sudo ./scripts/setup.sh
+```
+
+Run the security test:
+
+```bash
+sudo ./scripts/test_security.sh
 ```
 
 This will:

@@ -1,23 +1,10 @@
 services:
   wgrest:
-    image: ghcr.io/suquant/wgrest:latest
+    build:
+      context: ./wgrest-build
+      dockerfile: Dockerfile
+    image: wgrest:local
     container_name: wgrest
-    restart: unless-stopped
-    network_mode: host
-    privileged: true
-    depends_on:
-      - wireguard
-    volumes:
-      - /etc/wireguard:/etc/wireguard
-      - ./config/wgrest.toml:/etc/wgrest/config.toml:ro
-    environment:
-      - WG_DEVICE=wg0,wg1
-      - WGREST_LISTEN=127.0.0.1:8080
-      - WGREST_AUTH_TOKEN=${WGREST_API_KEY}
-
-  wireguard:
-    image: lscr.io/linuxserver/wireguard:latest
-    container_name: wireguard
     restart: unless-stopped
     network_mode: host
     privileged: true
@@ -25,5 +12,7 @@ services:
       - NET_ADMIN
       - SYS_MODULE
     volumes:
-      - /lib/modules:/lib/modules:ro
-    command: /bin/sh -c "modprobe wireguard && sleep infinity"
+      - /etc/wireguard:/etc/wireguard
+    environment:
+      - WGREST_LISTEN=127.0.0.1:8080
+      - WGREST_AUTH_TOKEN=${WGREST_API_KEY}

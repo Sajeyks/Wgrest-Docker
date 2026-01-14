@@ -14,5 +14,5 @@ services:
     volumes:
       - /etc/wireguard:/etc/wireguard
     environment:
-      - WGREST_LISTEN=127.0.0.1:8080
+      - WGREST_LISTEN=127.0.0.1:7070
       - WGREST_AUTH_TOKEN=${WGREST_API_KEY}

@@ -39,7 +39,7 @@ RUN mkdir -p /app/data /var/lib/wgrest
 
 # DO NOT switch to non-root user - wgrest needs root to manage WireGuard
 
-EXPOSE 8080
+EXPOSE 7070
 
 # Use the same entrypoint style as original
 ENTRYPOINT ["/app/wgrest"]

@@ -8,7 +8,7 @@ if [ -f "$PROJECT_DIR/.env" ]; then
     source "$PROJECT_DIR/.env"
 fi
 
-WGREST_PORT=${WGREST_PORT:-8080}
+WGREST_PORT=${WGREST_PORT:-7070}
 WGREST_API_KEY=${WGREST_API_KEY:-}
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }

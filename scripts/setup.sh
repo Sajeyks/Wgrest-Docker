@@ -12,7 +12,7 @@ WG0_PORT=${WG0_PORT:-51820}
 WG1_PORT=${WG1_PORT:-51821}
 WG0_ADDRESS=${WG0_ADDRESS:-10.10.0.1/16}
 WG1_ADDRESS=${WG1_ADDRESS:-10.11.0.1/16}
-WGREST_PORT=${WGREST_PORT:-8080}
+WGREST_PORT=${WGREST_PORT:-7070}
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2; exit 1; }

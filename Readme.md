@@ -9,7 +9,7 @@ Single Server (WireGuard + Django/Coolify)
 ├── wg0 interface (10.10.0.1) ─── MikroTik RADIUS traffic
 ├── wg1 interface (10.11.0.1) ─── MikroTik API traffic
 ├── FreeRADIUS (binds to 10.10.0.1)
-├── wgrest API (localhost:8080)
+├── wgrest API (localhost:7070)
 └── Coolify
     └── Django container (connects via localhost)
 ```
@@ -106,7 +106,7 @@ Server Public Keys (add to Django settings):
 Endpoints:
   WG0: 203.0.113.50:51820
   WG1: 203.0.113.50:51821
-  wgrest API: http://localhost:8080
+  wgrest API: http://localhost:7070
 ```
 
 Save these for Django configuration.
@@ -118,7 +118,7 @@ Save these for Django configuration.
 ### Django .env
 
 ```bash
-WGREST_API_URL=http://localhost:8080
+WGREST_API_URL=http://localhost:7070
 WGREST_API_KEY=same_key_from_wgrest_server
 
 WIREGUARD_SERVER_HOST=203.0.113.50
@@ -187,7 +187,7 @@ DJANGO_API_TOKEN=paste_token_here
 
 ```bash
 sudo wg show
-curl -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:8080/v1/devices/
+curl -H "Authorization: Bearer $WGREST_API_KEY" http://localhost:7070/v1/devices/
 sudo ./scripts/test_security.sh
 ```
 
@@ -226,7 +226,7 @@ sudo systemctl restart freeradius
 ```bash
 docker ps | grep wgrest
 docker logs wgrest
-curl http://localhost:8080/v1/devices/
+curl http://localhost:7070/v1/devices/
 ```
 
 ### Firewall issues

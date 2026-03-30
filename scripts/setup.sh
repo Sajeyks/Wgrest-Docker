@@ -103,10 +103,14 @@ WG0_PORT=${WG0_PORT:-51820}
 WG1_PORT=${WG1_PORT:-51821}
 
 remove_wg_rules() {
-    iptables -S INPUT | grep -E "(${WG0_PORT}|${WG1_PORT})" | while read rule; do
+    iptables -S INPUT | grep -E "(${WG0_PORT}|${WG1_PORT}|8728|8291)" | while read rule; do
         iptables $(echo "$rule" | sed 's/-A/-D/')
     done 2>/dev/null || true
-    
+
+    iptables -S OUTPUT | grep -E "(8728|8291)" | while read rule; do
+        iptables $(echo "$rule" | sed 's/-A/-D/')
+    done 2>/dev/null || true
+
     iptables -S FORWARD | grep -E "(wg0|wg1)" | while read rule; do
         iptables $(echo "$rule" | sed 's/-A/-D/')
     done 2>/dev/null || true
@@ -125,6 +129,12 @@ iptables -A FORWARD -i wg1 -o wg0 -j DROP
 iptables -A FORWARD -i wg0 -d 10.10.0.1 -p udp --dport 1812 -j ACCEPT
 iptables -A FORWARD -i wg0 -d 10.10.0.1 -p udp --dport 1813 -j ACCEPT
 iptables -A FORWARD -i wg0 -j DROP
+
+# Allow Django (host) to reach MikroTik RouterOS API and Winbox via wg1
+iptables -A INPUT -i wg1 -p tcp --dport 8728 -j ACCEPT
+iptables -A INPUT -i wg1 -p tcp --dport 8291 -j ACCEPT
+iptables -A OUTPUT -o wg1 -p tcp --dport 8728 -j ACCEPT
+iptables -A OUTPUT -o wg1 -p tcp --dport 8291 -j ACCEPT
 iptables -A FORWARD -i wg1 -j DROP
 SCRIPT
 

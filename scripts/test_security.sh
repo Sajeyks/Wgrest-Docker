@@ -58,7 +58,7 @@ check "wg1 is up" "ip link show wg1 | grep -q UP"
 echo ""
 
 echo "Services:"
-check "wgrest API responding" "curl -sf http://localhost:$WGREST_PORT/v1/devices/"
+check "wgrest API responding" "curl -sf -H 'Authorization: Bearer $WGREST_API_KEY' http://10.11.0.1:$WGREST_PORT/v1/devices/"
 check "Docker containers running" "docker ps | grep -q wgrest"
 echo ""
 

@@ -9,9 +9,9 @@ Single Server (WireGuard + Django/Coolify)
 ├── wg0 interface (10.10.0.1) ─── MikroTik RADIUS traffic
 ├── wg1 interface (10.11.0.1) ─── MikroTik API traffic
 ├── FreeRADIUS (binds to 10.10.0.1)
-├── wgrest API (localhost:7070)
+├── wgrest API (0.0.0.0:7070, firewalled — LAN/host only)
 └── Coolify
-    └── Django container (connects via localhost)
+    └── Django container (connects via host.docker.internal:7070)
 ```
 
 ## Traffic Rules
@@ -23,7 +23,7 @@ Single Server (WireGuard + Django/Coolify)
 | MikroTik (wg0) | Internet | ✗ |
 | MikroTik (wg1) | Other MikroTik | ✗ |
 | MikroTik (wg1) | Internet | ✗ |
-| Django (localhost) | wgrest API | ✓ |
+| Django (host/container) | wgrest API (host:7070) | ✓ |
 | Django (host) | MikroTik (10.11.0.X) | ✓ |
 
 ---
@@ -117,8 +117,20 @@ Save these for Django configuration.
 
 ### Django .env
 
+> **Coolify note**: Django runs inside a Docker container. `localhost` inside
+> the container refers to the container itself, not the host. Use
+> `http://host.docker.internal:7070` so Django can reach wgrest on the host.
+> Add `extra_hosts: ["host.docker.internal:host-gateway"]` to the Django
+> service in your Coolify compose config (or equivalent Docker flag
+> `--add-host=host.docker.internal:host-gateway`).
+
 ```bash
-WGREST_API_URL=http://localhost:7070
+# Coolify / Docker-based Django:
+WGREST_API_URL=http://host.docker.internal:7070
+
+# Plain host-based Django (non-Docker):
+# WGREST_API_URL=http://localhost:7070
+
 WGREST_API_KEY=same_key_from_wgrest_server
 
 WIREGUARD_SERVER_HOST=203.0.113.50

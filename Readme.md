@@ -255,3 +255,48 @@ sudo wg show
 sudo wg-quick down wg0 && sudo wg-quick up wg0
 sudo wg-quick down wg1 && sudo wg-quick up wg1
 ```
+
+### WireGuard handshake times out even after importing Django config
+
+Symptom: MikroTik log shows `Handshake for peer did not complete after 5 seconds`
+even though you downloaded the WireGuard config from Django and imported it.
+
+**Why this happens — two separate keys are in play:**
+
+The config Django generates contains:
+1. **MikroTik's private key** — sets MikroTik's identity (its public key is derived from this)
+2. **VPS server public keys** — listed as `[Peer]` entries so MikroTik knows who to connect to
+
+Importing the config correctly gives MikroTik the right private key. But the VPS's wg1 (via wgrest) also needs to have **MikroTik's resulting public key** registered as a peer. If that registration never made it into `wg1.conf`, the VPS silently drops every handshake initiation from MikroTik — it doesn't recognise the source.
+
+**Most likely cause — peer was never registered:**
+
+If Django was running inside a Docker container (Coolify) while wgrest was bound to `10.11.0.1:7070` only, Django's API call to register the peer on wgrest would have failed — `localhost:7070` inside the container routes to the container, not the host. Django stores the public key in its own database, but it was never written to `wg1.conf`.
+
+**Confirm on the VPS:**
+
+```bash
+sudo grep -c "\[Peer\]" /etc/wireguard/wg1.conf
+# Should equal the number of registered gateways.
+# If 0, no peers were ever registered.
+
+sudo wg show wg1
+# Should list peers with allowed-ips matching your gateways.
+```
+
+**Fix:**
+
+1. Deploy this wgrest-docker update (`WGREST_LISTEN=0.0.0.0:7070`) and restart the container:
+   ```bash
+   docker compose pull && docker compose up -d
+   ```
+2. Set `WGREST_API_URL=http://host.docker.internal:7070` in Django's env and redeploy Django.
+3. For each affected gateway, POST to the resync endpoint to force peer registration:
+   ```
+   POST /wireguard/resync-keys/<gateway_id>/
+   public_key=<the public key shown in Django's gateway detail page>
+   ```
+   This deletes any stale peer entry and re-creates it with the correct key.
+   Since MikroTik already has the matching private key (from the imported config),
+   the WireGuard handshake will complete as soon as the peer is registered.
+4. Verify: `sudo wg show wg1` should show `latest handshake` within 30 seconds.

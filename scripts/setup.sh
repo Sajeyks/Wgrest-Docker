@@ -176,10 +176,19 @@ start_wireguard() {
     systemctl enable wg-quick@wg1
 }
 
+# Must run before create_wg_configs: wgrest dumps every interface's config on
+# shutdown, and a container from before the state-dir move would write that
+# dump, with no Address line, straight over the confs we are about to write.
+stop_wgrest() {
+    log "Stopping wgrest..."
+    cd "$PROJECT_DIR"
+    docker compose down 2>/dev/null || true
+    docker rm -f wgrest 2>/dev/null || true
+}
+
 start_docker() {
     log "Starting Docker services..."
     cd "$PROJECT_DIR"
-    docker compose down 2>/dev/null || true
     docker compose up -d --build
 }
 
@@ -216,6 +225,7 @@ main() {
     check_root
     install_dependencies
     generate_server_keys
+    stop_wgrest
     create_wg_configs
     setup_firewall
     start_wireguard

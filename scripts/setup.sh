@@ -7,6 +7,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 if [ -f "$PROJECT_DIR/.env" ]; then
     source "$PROJECT_DIR/.env"
 fi
+source "$SCRIPT_DIR/wg-conf.sh"
 
 WG0_PORT=${WG0_PORT:-51820}
 WG1_PORT=${WG1_PORT:-51821}
@@ -44,6 +45,16 @@ generate_server_keys() {
     mkdir -p /etc/wireguard
     chmod 700 /etc/wireguard
     
+    # A key missing beside a conf that has one must be recovered, not regenerated:
+    # a new key would orphan every router already peered with this server.
+    for i in wg0 wg1; do
+        if [ ! -f /etc/wireguard/$i.key ] && grep -q '^PrivateKey' /etc/wireguard/$i.conf 2>/dev/null; then
+            sed -n 's/^PrivateKey *= *//p' /etc/wireguard/$i.conf > /etc/wireguard/$i.key
+            wg pubkey < /etc/wireguard/$i.key > /etc/wireguard/$i.pub
+            chmod 600 /etc/wireguard/$i.key
+        fi
+    done
+
     if [ ! -f /etc/wireguard/wg0.key ]; then
         wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
         chmod 600 /etc/wireguard/wg0.key
@@ -65,22 +76,8 @@ generate_server_keys() {
 
 create_wg_configs() {
     log "Creating WireGuard configs..."
-    
-    cat > /etc/wireguard/wg0.conf << EOF
-[Interface]
-PrivateKey = $WG0_PRIVATE
-Address = $WG0_ADDRESS
-ListenPort = $WG0_PORT
-EOF
-    
-    cat > /etc/wireguard/wg1.conf << EOF
-[Interface]
-PrivateKey = $WG1_PRIVATE
-Address = $WG1_ADDRESS
-ListenPort = $WG1_PORT
-EOF
-    
-    chmod 600 /etc/wireguard/wg0.conf /etc/wireguard/wg1.conf
+    write_wg_conf wg0 "$WG0_PRIVATE" "$WG0_ADDRESS" "$WG0_PORT"
+    write_wg_conf wg1 "$WG1_PRIVATE" "$WG1_ADDRESS" "$WG1_PORT"
 }
 
 setup_firewall() {
@@ -101,13 +98,10 @@ create_firewall_script() {
 #!/bin/bash
 WG0_PORT=${WG0_PORT:-51820}
 WG1_PORT=${WG1_PORT:-51821}
+WGREST_PORT=${WGREST_PORT:-7070}
 
 remove_wg_rules() {
-    iptables -S INPUT | grep -E "(${WG0_PORT}|${WG1_PORT}|8728|8291)" | while read rule; do
-        iptables $(echo "$rule" | sed 's/-A/-D/')
-    done 2>/dev/null || true
-
-    iptables -S OUTPUT | grep -E "(8728|8291)" | while read rule; do
+    iptables -S INPUT | grep -E "(${WG0_PORT}|${WG1_PORT}|${WGREST_PORT})" | while read rule; do
         iptables $(echo "$rule" | sed 's/-A/-D/')
     done 2>/dev/null || true
 
@@ -120,6 +114,11 @@ remove_wg_rules
 
 iptables -A INPUT -p udp --dport $WG0_PORT -j ACCEPT
 iptables -A INPUT -p udp --dport $WG1_PORT -j ACCEPT
+
+# wgrest listens on wg1's own address, so without these any router on a tunnel
+# could add or delete other tenants' peers.
+iptables -A INPUT -i wg0 -p tcp --dport $WGREST_PORT -j DROP
+iptables -A INPUT -i wg1 -p tcp --dport $WGREST_PORT -j DROP
 
 iptables -A FORWARD -i wg0 -o wg0 -j DROP
 iptables -A FORWARD -i wg1 -o wg1 -j DROP
@@ -140,6 +139,7 @@ SCRIPT
 
     sed -i "s/WG0_PORT=\${WG0_PORT:-51820}/WG0_PORT=${WG0_PORT}/" /usr/local/bin/wg-firewall.sh
     sed -i "s/WG1_PORT=\${WG1_PORT:-51821}/WG1_PORT=${WG1_PORT}/" /usr/local/bin/wg-firewall.sh
+    sed -i "s/WGREST_PORT=\${WGREST_PORT:-7070}/WGREST_PORT=${WGREST_PORT}/" /usr/local/bin/wg-firewall.sh
     
     chmod +x /usr/local/bin/wg-firewall.sh
 }
@@ -148,7 +148,7 @@ create_systemd_service() {
     cat > /etc/systemd/system/wg-firewall.service << EOF
 [Unit]
 Description=WireGuard Firewall Rules
-After=network.target
+After=network.target wg-quick@wg0.service wg-quick@wg1.service
 
 [Service]
 Type=oneshot
@@ -180,13 +180,13 @@ start_docker() {
     log "Starting Docker services..."
     cd "$PROJECT_DIR"
     docker compose down 2>/dev/null || true
-    docker compose up -d
+    docker compose up -d --build
 }
 
 wait_for_wgrest() {
     log "Waiting for wgrest API..."
     for i in {1..30}; do
-        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$WGREST_PORT/v1/devices/" | grep -q "200\|401"; then
+        if curl -s -o /dev/null -w "%{http_code}" "http://${WG1_ADDRESS%/*}:$WGREST_PORT/v1/devices/" | grep -q "200\|401"; then
             log "wgrest API is ready"
             return 0
         fi
@@ -208,7 +208,7 @@ print_summary() {
     echo "Endpoints:"
     echo "  WG0: ${SERVER_IP:-<SERVER_IP>}:$WG0_PORT"
     echo "  WG1: ${SERVER_IP:-<SERVER_IP>}:$WG1_PORT"
-    echo "  wgrest API: http://localhost:$WGREST_PORT"
+    echo "  wgrest API: http://${WG1_ADDRESS%/*}:$WGREST_PORT"
     echo ""
 }
 

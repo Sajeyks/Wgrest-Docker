@@ -7,6 +7,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 if [ -f "$PROJECT_DIR/.env" ]; then
     source "$PROJECT_DIR/.env"
 fi
+source "$SCRIPT_DIR/wg-conf.sh"
 
 WGREST_PORT=${WGREST_PORT:-7070}
 WGREST_API_KEY=${WGREST_API_KEY:-}
@@ -39,21 +40,10 @@ WG1_PORT=$(echo "$CONFIG" | jq -r '.servers[] | select(.interface == "wg1") | .l
 
 rm -f /tmp/wg0_key /tmp/wg1_key
 
-cat > /etc/wireguard/wg0.conf << EOF
-[Interface]
-PrivateKey = $WG0_PRIVATE
-Address = $WG0_ADDRESS
-ListenPort = $WG0_PORT
-EOF
-
-cat > /etc/wireguard/wg1.conf << EOF
-[Interface]
-PrivateKey = $WG1_PRIVATE
-Address = $WG1_ADDRESS
-ListenPort = $WG1_PORT
-EOF
-
-chmod 600 /etc/wireguard/wg0.conf /etc/wireguard/wg1.conf
+write_wg_conf wg0 "$WG0_PRIVATE" "$WG0_ADDRESS" "$WG0_PORT"
+write_wg_conf wg1 "$WG1_PRIVATE" "$WG1_ADDRESS" "$WG1_PORT"
+# Django is the source of truth here; a stale local copy would resurrect deleted peers.
+rm -f "$WGREST_STATE_DIR"/wg0.conf "$WGREST_STATE_DIR"/wg1.conf
 
 log "Restarting WireGuard interfaces..."
 wg-quick down wg0 2>/dev/null || true
@@ -80,7 +70,7 @@ echo "$WG0_PEERS" | while read -r peer; do
         curl -sf -X POST \
             -H "Authorization: Bearer $WGREST_API_KEY" \
             -H "Content-Type: application/json" \
-            "http://localhost:$WGREST_PORT/v1/devices/wg0/peers/" \
+            "http://${WG1_ADDRESS%/*}:$WGREST_PORT/v1/devices/wg0/peers/" \
             -d "{\"public_key\": \"$PUBLIC_KEY\", \"allowed_ips\": [\"$ALLOWED_IPS\"], \"name\": \"$NAME\"}" \
             > /dev/null && ((WG0_COUNT++)) || true
     fi
@@ -95,7 +85,7 @@ echo "$WG1_PEERS" | while read -r peer; do
         curl -sf -X POST \
             -H "Authorization: Bearer $WGREST_API_KEY" \
             -H "Content-Type: application/json" \
-            "http://localhost:$WGREST_PORT/v1/devices/wg1/peers/" \
+            "http://${WG1_ADDRESS%/*}:$WGREST_PORT/v1/devices/wg1/peers/" \
             -d "{\"public_key\": \"$PUBLIC_KEY\", \"allowed_ips\": [\"$ALLOWED_IPS\"], \"name\": \"$NAME\"}" \
             > /dev/null && ((WG1_COUNT++)) || true
     fi

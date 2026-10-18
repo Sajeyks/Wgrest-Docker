@@ -6,8 +6,10 @@ RUN apk add --no-cache git gcc
 
 WORKDIR /app
 
-# Clone the wgrest repository
-RUN git clone https://github.com/suquant/wgrest.git .
+# Pinned: an unpinned clone is how the config-dump rewrite (which strips
+# Address lines) reached prod on an ordinary rebuild. Read upstream before bumping.
+ARG WGREST_REF=79d07f72b271a51b5f6cb2153354ec1695fe06ab
+RUN git clone https://github.com/suquant/wgrest.git . && git checkout "$WGREST_REF"
 
 # Build using the correct structure with compatible Go version
 RUN export appVersion=$(git describe --tags `git rev-list -1 HEAD` 2>/dev/null || echo "unknown") && \

@@ -12,7 +12,11 @@ services:
       - NET_ADMIN
       - SYS_MODULE
     volumes:
-      - /etc/wireguard:/etc/wireguard
+      - /var/lib/wgrest/wireguard:/var/lib/wgrest/wireguard
     environment:
       - WGREST_LISTEN=10.11.0.1:7070
-      - WGREST_AUTH_TOKEN=${WGREST_API_KEY}
+      # Not under /etc/wireguard: see scripts/wg-conf.sh.
+      - WGREST_CONFIG_DIR=/var/lib/wgrest/wireguard
+      # The pinned wgrest reads only this name. The old WGREST_AUTH_TOKEN was
+      # silently ignored, leaving the API open.
+      - WGREST_STATIC_AUTH_TOKEN=${WGREST_API_KEY}
